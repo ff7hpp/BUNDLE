@@ -12,7 +12,7 @@
 ## 🚀 How to Run
 
 ### 1. Download the script
-Save `BUNDLE-UNIVERSAL.ps1` anywhere on your computer.
+Save `BUNDLE.ps1` anywhere on your computer.
 
 ### 2. Open PowerShell
 Press `Win + R`, type `powershell`, press **Enter**
@@ -20,7 +20,7 @@ Press `Win + R`, type `powershell`, press **Enter**
 ### 3. Paste this and press Enter
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; $f = Get-ChildItem -Path $HOME -Filter "BUNDLE-UNIVERSAL.ps1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { Unblock-File $f.FullName; & $f.FullName } else { Write-Host "BUNDLE-UNIVERSAL.ps1 not found. Make sure it is downloaded." -ForegroundColor Red }
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; $f = Get-ChildItem -Path $HOME -Filter "BUNDLE.ps1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { Unblock-File $f.FullName; & $f.FullName } else { Write-Host "BUNDLE.ps1 not found. Make sure it is downloaded." -ForegroundColor Red }
 ```
 
 The tool will find the script automatically — no need to navigate to any folder.
