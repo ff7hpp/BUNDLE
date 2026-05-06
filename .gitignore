@@ -1,0 +1,1 @@
+Nothing needs to be added to the .gitignore file based on the provided changes. The added files (BUNDLE_v7.ps1 and README_V7.md) are PowerShell script and Markdown documentation files respectively, which should typically be version controlled rather than ignored. No compiled artifacts, temporary files, or other items that should be ignored were detected in the changes.
