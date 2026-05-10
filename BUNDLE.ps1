@@ -385,9 +385,20 @@ function Get-CachedAnalysis {
     }
     
     $cache = Get-Content $script:cachePath | ConvertFrom-Json -Depth 10
-    
-    if ($cache.Files.ContainsKey($FilePath)) {
-        $cached = $cache.Files[$FilePath]
+
+    $cacheFiles = @{}
+    if ($cache.Files) {
+        if ($cache.Files -is [System.Collections.IDictionary]) {
+            $cacheFiles = $cache.Files
+        } else {
+            foreach ($prop in $cache.Files.PSObject.Properties) {
+                $cacheFiles[$prop.Name] = $prop.Value
+            }
+        }
+    }
+
+    if ($cacheFiles.ContainsKey($FilePath)) {
+        $cached = $cacheFiles[$FilePath]
         $cachedTime = [datetime]::Parse($cached.LastModified)
         
         if ($cachedTime -eq $LastModified) {
@@ -414,6 +425,16 @@ function Update-Cache {
         }
     }
     
+    if (-not ($cache.Files -is [System.Collections.IDictionary])) {
+        $existingFiles = @{}
+        if ($cache.Files) {
+            foreach ($prop in $cache.Files.PSObject.Properties) {
+                $existingFiles[$prop.Name] = $prop.Value
+            }
+        }
+        $cache.Files = $existingFiles
+    }
+
     $cache.Files[$FilePath] = @{
         LastModified = $LastModified.ToString("o")
         Analysis = $Analysis
@@ -1109,41 +1130,16 @@ function Invoke-ParallelFileAnalysis {
         [System.Collections.Generic.List[FileInfo]]$Files,
         [int]$MaxThreads = 4
     )
-    
-    if (-not $Parallel -or $PSVersionTable.PSVersion.Major -lt 7) {
-        # Fallback to sequential processing
-        return $Files | ForEach-Object { 
-            Invoke-SingleFileAnalysis -File $_ 
-        }
+
+    if ($Parallel -and $PSVersionTable.PSVersion.Major -ge 7) {
+        Write-Status "[PARALLEL]" "Using full analysis pipeline for $($Files.Count) files (compatibility mode)" "Yellow" "White"
     }
-    
-    Write-Status "[PARALLEL]" "Processing $($Files.Count) files with $MaxThreads threads" "Cyan" "White"
-    
-    $results = $Files | ForEach-Object -Parallel {
-        $file = $_
-        
-        # Import the analysis function (serialized)
-        function Invoke-SingleFileAnalysis {
-            param([System.IO.FileInfo]$File)
-            
-            $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-            if (-not $content) { return $null }
-            
-            $relPath = $file.FullName.Replace($using:ProjectRoot, '').TrimStart('\').TrimStart('/')
-            
-            return @{
-                FilePath = $file.FullName
-                RelativePath = $relPath
-                Content = $content
-                Size = $file.Length
-                LastModified = $file.LastWriteTimeUtc
-            }
-        }
-        
-        return Invoke-SingleFileAnalysis -File $file
-    } -ThrottleLimit $MaxThreads
-    
-    return $results
+
+    # Always use the full per-file analysis pipeline to preserve security findings,
+    # redaction behavior, metrics, dependency extraction, and sorting metadata.
+    return $Files | ForEach-Object {
+        Invoke-SingleFileAnalysis -File $_
+    }
 }
 
 # ============================================================
@@ -1943,7 +1939,7 @@ try {
         exit 0
     }
     
-    # Write Markdown output
+    # Write primary output artifact
     if ($Format -eq 'md' -or $Format -eq 'txt') {
         $writer = [System.IO.StreamWriter]::new($outputPath, $false, [System.Text.Encoding]::UTF8)
         
@@ -1996,6 +1992,34 @@ try {
         }
         
         Write-Status "[WRITE]" "Output: $outputPath" "Green" "White"
+    } elseif ($Format -eq 'json') {
+        $outputPayload = [ordered]@{
+            Metadata = [ordered]@{
+                ProjectRoot = $ProjectRoot
+                GeneratedAt = (Get-Date -Format "o")
+                Format = $Format
+                TotalFiles = $fileAnalyses.Count
+                TotalTokens = $totalTokens
+            }
+            RiskAssessment = $riskAssessment
+            DependencyGraph = $script:dependencyGraph
+            FileAnalyses = $sortedAnalyses
+            SecurityFindings = $script:secretsFound
+        }
+
+        $outputPayload | ConvertTo-Json -Depth 12 | Set-Content -Path $outputPath -Encoding UTF8
+        Write-Status "[WRITE]" "Output: $outputPath" "Green" "White"
+    } elseif ($Format -eq 'html') {
+        Generate-HTMLReport `
+            -OutputPath $outputPath `
+            -ProjectName (Split-Path $ProjectRoot -Leaf) `
+            -FileAnalyses $fileAnalyses `
+            -RiskAssessment $riskAssessment `
+            -DependencyGraph $script:dependencyGraph
+
+        Write-Status "[WRITE]" "Output: $outputPath" "Green" "White"
+    } else {
+        throw "Unsupported format: $Format. Supported formats are md, txt, json, html."
     }
     
     # Generate HTML report if requested
