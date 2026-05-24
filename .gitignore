@@ -1,1 +1,55 @@
-Nothing needs to be added to the .gitignore file based on the provided changes. The added files (BUNDLE_v7.ps1 and README_V7.md) are PowerShell script and Markdown documentation files respectively, which should typically be version controlled rather than ignored. No compiled artifacts, temporary files, or other items that should be ignored were detected in the changes.
+# Generated BUNDLE outputs
+bundle_*.txt
+bundle_*.md
+bundle_*.json
+bundle_*.html
+bundle_errors.log
+bundle.config.json
+.bundle-cache/
+.bundle_history.log
+
+# Local test/output folders
+tmp-bundle-v7-test/
+tmp-bundle-v7-output/
+
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# PowerShell artifacts
+*.ps1xml
+*.pssc
+*.psrc
+*.psd1.bak
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.cache
+tmp/
+temp/

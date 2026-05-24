@@ -1,87 +1,71 @@
-<#
-.SYNOPSIS
-    Universal Multi-Drive Project Bundler v6.0 — Project Intelligence Packager
-.DESCRIPTION
-    Scans any project on any drive and bundles source code into a single
-    LLM-ready file with full project intelligence, git metadata, secret scanning,
-    encoding detection, logical ordering, and integrity verification.
-
-    NEW IN v6.0
-      Stability   : Graceful Ctrl+C | try/finally on writer | symlink loop guard
-                    Network drive timeout | structured error log | no empty catches
-      Completeness: .gitignore fully respected | Git metadata (branch/commit/diff)
-                    Secret scanner (20+ patterns) | Encoding detection (UTF-8/16/1252)
-                    Project type + framework auto-detection | Entry point detection
-      LLM Quality : Weighted token estimate (Arabic/bilingual aware) | Context window
-                    overflow guard | SHA-256 integrity checksum | Path privacy mode
-                    LLM context header with suggested prompt | Logical file ordering
-      Output      : txt | md (language-tagged fences) | json formats
-                    Auto-split for large projects | Per-language stats
-      UX          : Dry-run | Overwrite protection | Config save/load per project
-                    Progress during search phase | Run history log
-
-.PARAMETER ProjectRoot      Path or name of the project to bundle
-.PARAMETER OutputDir        Where to save the output file
-.PARAMETER OutputFile       Custom output filename
-.PARAMETER Format           Output format: txt (default) | md | json
-.PARAMETER Profile          Extension preset: auto | react | python | java | dotnet | go | rust
-.PARAMETER MaxFileSizeMB    Skip files larger than this MB (default 10)
-.PARAMETER SplitKTokens     Split bundle into parts under N K-tokens (0 = off)
-.PARAMETER DryRun           Show what would be bundled, write nothing
-.PARAMETER StripPaths       Replace absolute paths with [PROJECT_ROOT] for privacy
-.PARAMETER Redact           Replace detected secrets with [REDACTED]
-.PARAMETER IncludeTree      Include filtered directory tree in output
-.PARAMETER SaveConfig       Save current run settings to bundle.config.json
-.PARAMETER LoadConfig       Load settings from bundle.config.json in project root
-.PARAMETER NoOverwritePrompt Skip confirmation when output already exists
-.PARAMETER ExtraExtensions  Additional extensions to include (e.g. ".dart")
-.PARAMETER ExtraExcludes    Additional folder names to exclude
-.PARAMETER Quiet            Suppress progress bar
-
-.NOTES
-    Version : 6.0 — Project Intelligence Packager
-    Safe    : Secret scanning | .gitignore-aware | Encoding-correct | No crash on Ctrl+C
-    Smart   : Git-aware | Project-type detection | LLM-optimized output | Integrity verified
-#>
+# ============================================================
+# BUNDLE.ps1 v7.0 - Project Intelligence Packager
+# Project Intelligence Packager with source bundling and lightweight analysis
+# ============================================================
+# ENHANCEMENTS IN v7.0:
+#   ✓ Regex-based dependency and export extraction
+#   ✓ Confidence-scored security findings with allowlist
+#   ✓ Dependency graph building and visualization
+#   ✓ Cyclomatic complexity calculation
+#   ✓ Code duplication detection
+#   ✓ Incremental analysis with caching
+#   ✓ Optional parallel file processing (PowerShell 7+)
+#   ✓ HTML report generation
+#   ✓ Risk scoring system (0-100)
+#   ✓ Markdown, text, JSON, and HTML outputs
+#   ✓ Optional cache for repeated analysis
+#   ✓ Language-aware parsing profiles
+# ============================================================
 
 [CmdletBinding()]
 param(
-    [string]   $OutputFile        = "",
-    [string]   $ProjectRoot       = "",
+    [string]   $ProjectRoot       = ".",
     [string]   $OutputDir         = "",
-    [switch]   $IncludeTree,
+    [string]   $OutputFile        = "",
+    [ValidateSet('txt','md','json','html')]
+    [string]   $Format            = "md",
+    [ValidateSet('auto','react','python','java','dotnet','go','rust','general')]
+    [string]   $Profile           = "auto",
     [int]      $MaxFileSizeMB     = 10,
-    [string[]] $ExtraExtensions   = @(),
-    [string[]] $ExtraExcludes     = @(),
-    [switch]   $Quiet,
-    [ValidateSet('txt','md','json')]
-    [string]   $Format            = "txt",
+    [int]      $SplitKTokens      = 0,
     [switch]   $DryRun,
     [switch]   $StripPaths,
     [switch]   $Redact,
-    [int]      $SplitKTokens      = 0,
-    [ValidateSet('auto','react','python','java','dotnet','go','rust','general')]
-    [string]   $Profile           = "auto",
+    [switch]   $IncludeTree,
     [switch]   $SaveConfig,
     [switch]   $LoadConfig,
-    [switch]   $NoOverwritePrompt
+    [switch]   $NoOverwritePrompt,
+    [string[]] $ExtraExtensions   = @(),
+    [string[]] $ExtraExcludes     = @(),
+    [string[]] $AllowlistPatterns = @(),  # NEW: Known false positives
+    [switch]   $EnableCache,               # NEW: Incremental analysis
+    [switch]   $Parallel,                  # NEW: Parallel processing
+    [int]      $MaxThreads        = 4,     # NEW: Thread pool size
+    [switch]   $GenerateHTML,              # NEW: HTML report
+    [switch]   $BuildDepGraph,             # NEW: Dependency graph
+    [switch]   $Quiet
 )
 
 # ============================================================
-#  GLOBAL STATE
+# GLOBAL STATE & VERSIONING
 # ============================================================
 
-$script:VERSION        = "6.0"
+$script:VERSION        = "7.0.0"
 $script:writer         = $null
 $script:resolvedOutput = ""
 $script:errorLog       = [System.Collections.Generic.List[string]]::new()
 $script:visitedPaths   = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $script:secretsFound   = [System.Collections.Generic.List[hashtable]]::new()
+$script:dependencyGraph = @{ Nodes = @(); Edges = @(); AdjacencyList = @{} }
+$script:fileMetrics    = @{}
 $script:totalTokens    = 0L
-$maxFileBytes          = $MaxFileSizeMB * 1024 * 1024
+$script:cachePath      = ""
+$script:startTime      = Get-Date
+
+$maxFileBytes = $MaxFileSizeMB * 1024 * 1024
 
 # ============================================================
-#  EXTENSIONS & EXCLUDES
+# EXTENSIONS & EXCLUDES
 # ============================================================
 
 $includeExtensions = @(
@@ -89,7 +73,7 @@ $includeExtensions = @(
     '.py','.pyw','.pyx','.pyi',
     '.js','.mjs','.cjs','.ts','.tsx','.jsx',
     '.html','.htm','.css','.scss','.sass','.less','.vue','.svelte',
-    '.json','.yaml','.yml','.toml','.ini','.cfg','.conf','.xml','.xsd',
+    '.json','.jsonc','.yaml','.yml','.toml','.ini','.cfg','.conf','.xml','.xsd',
     '.md','.markdown','.rst','.txt',
     '.sql','.ddl','.sh','.bash','.zsh','.bat','.cmd',
     '.java','.kt','.kts','.scala','.groovy',
@@ -139,15 +123,8 @@ $specialFileNames = @(
     'CHANGELOG','CONTRIBUTING','AUTHORS','CODEOWNERS','.env.example'
 )
 
-$systemSkipFolders = @(
-    'Windows','Program Files','Program Files (x86)','ProgramData',
-    '$Recycle.Bin','System Volume Information','Recovery','PerfLogs',
-    'MSOCache','Config.Msi','$WinREAgent','$SysReset',
-    'Intel','AMD','NVIDIA','AppData'
-)
-
 # ============================================================
-#  LANGUAGE MAP (extension → Markdown fence tag)
+# LANGUAGE MAP & PARSING PROFILES
 # ============================================================
 
 $languageMap = @{
@@ -179,35 +156,157 @@ $languageMap = @{
     '.env.example'='bash';'.env.sample'='bash'
 }
 
+# Language-aware parsing profiles for dependency extraction
+$LinguisticProfiles = @{
+    'javascript' = @{
+        ImportPatterns = @(
+            "import\s+(?:[\w\s{},*]+\s+from\s+)?[""']([^""']+)[""']",
+            "require\s*\(\s*[""']([^""']+)[""']\s*\)",
+            "import\s*\(\s*[""']([^""']+)[""']\s*\)"
+        )
+        ExportPatterns = @(
+            'export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+(\w+)',
+            'module\.exports\s*=\s*(?:\{[^}]*\}|[\w]+)',
+            'exports\.(\w+)\s*='
+        )
+        CommentStyles = @('//', '/*', '/**')
+        StringDelimiters = @("'", '"', '`')
+        FunctionPattern = '(?:async\s+)?function\s*\*?\s*(\w+)\s*\([^)]*\)'
+        ClassPattern = 'class\s+(\w+)(?:\s+extends\s+\w+)?'
+        ComplexityKeywords = @('if', 'else', 'for', 'while', 'switch', 'case', 'catch', '??', '&&', '||')
+    }
+    'typescript' = @{
+        ImportPatterns = @(
+            "import\s+(?:type\s+)?(?:[\w\s{},*]+\s+from\s+)?[""']([^""']+)[""']",
+            "require\s*\(\s*[""']([^""']+)[""']\s*\)"
+        )
+        ExportPatterns = @(
+            'export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type|enum)\s+(\w+)',
+            'export\s+\{[^}]*\}'
+        )
+        CommentStyles = @('//', '/*', '/**')
+        StringDelimiters = @("'", '"', '`')
+        FunctionPattern = '(?:async\s+)?(?:function|const|let)\s+(\w+)\s*[=:]'
+        ClassPattern = '(?:abstract\s+)?class\s+(\w+)(?:\s+extends\s+\w+)?(?:\s+implements\s+\w+)?'
+        ComplexityKeywords = @('if', 'else', 'for', 'while', 'switch', 'case', 'catch', '??', '&&', '||')
+    }
+    'python' = @{
+        ImportPatterns = @(
+            '^import\s+(\w+(?:\.\w+)*)',
+            '^from\s+(\w+(?:\.\w+)*)\s+import'
+        )
+        ExportPatterns = @(
+            '__all__\s*=\s*\[([^\]]+)\]',
+            '^(?:def|class)\s+(\w+)'
+        )
+        CommentStyles = @('#', '"""', "'''")
+        StringDelimiters = @("'", '"', '"""', "'''")
+        FunctionPattern = '(?:async\s+)?def\s+(\w+)\s*\([^)]*\)'
+        ClassPattern = 'class\s+(\w+)(?:\s*\([^)]*\))?'
+        ComplexityKeywords = @('if', 'elif', 'else', 'for', 'while', 'except', 'and', 'or')
+    }
+    'java' = @{
+        ImportPatterns = @('import\s+([\w.]+);')
+        ExportPatterns = @(
+            '(?:public|private|protected)?\s*(?:static)?\s*(?:final)?\s*(?:\w+)\s+(\w+)\s*\(',
+            'class\s+(\w+)'
+        )
+        CommentStyles = @('//', '/*', '/**')
+        StringDelimiters = @('"')
+        FunctionPattern = '(?:public|private|protected)?\s*(?:static)?\s*(?:\w+)\s+(\w+)\s*\([^)]*\)'
+        ClassPattern = '(?:public|private|protected)?\s*(?:abstract|final)?\s*class\s+(\w+)'
+        ComplexityKeywords = @('if', 'else', 'for', 'while', 'switch', 'case', 'catch')
+    }
+    'csharp' = @{
+        ImportPatterns = @('using\s+([\w.]+);')
+        ExportPatterns = @(
+            '(?:public|private|protected|internal)?\s*(?:static)?\s*(?:async)?\s*(?:\w+)\s+(\w+)\s*\(',
+            'class\s+(\w+)'
+        )
+        CommentStyles = @('//', '/*', '///')
+        StringDelimiters = @('"', '@"')
+        FunctionPattern = '(?:public|private|protected|internal)?\s*(?:static)?\s*(?:async)?\s*(?:\w+)\s+(\w+)\s*\([^)]*\)'
+        ClassPattern = '(?:public|private|protected|internal)?\s*(?:abstract|sealed)?\s*class\s+(\w+)'
+        ComplexityKeywords = @('if', 'else', 'for', 'foreach', 'while', 'switch', 'case', 'catch', '&&', '||')
+    }
+    'go' = @{
+        ImportPatterns = @("import\s+\(?[""']([^""']+)[""']\)")
+        ExportPatterns = @('func\s+(\w+)\s*\(', 'type\s+(\w+)\s+')
+        CommentStyles = @('//', '/*')
+        StringDelimiters = @('"', '`')
+        FunctionPattern = 'func\s+(?:\([^)]+\)\s+)?(\w+)\s*\([^)]*\)'
+        ClassPattern = 'type\s+(\w+)\s+struct'
+        ComplexityKeywords = @('if', 'else', 'for', 'range', 'switch', 'case', 'select')
+    }
+    'rust' = @{
+        ImportPatterns = @('use\s+([\w:]+);', 'mod\s+(\w+);')
+        ExportPatterns = @('pub\s+fn\s+(\w+)', 'pub\s+struct\s+(\w+)', 'pub\s+enum\s+(\w+)')
+        CommentStyles = @('//', '/*', '///')
+        StringDelimiters = @('"', 'r#"')
+        FunctionPattern = 'pub\s+fn\s+(\w+)\s*\([^)]*\)'
+        ClassPattern = 'pub\s+struct\s+(\w+)'
+        ComplexityKeywords = @('if', 'else', 'for', 'loop', 'while', 'match', '?')
+    }
+}
+
 # ============================================================
-#  SECRET PATTERNS (20 patterns)
+# SECRET PATTERNS WITH CONFIDENCE SCORING
 # ============================================================
 
 $secretPatterns = @(
-    @{ Name='OpenAI Key';        Pattern='sk-[a-zA-Z0-9T_\-]{20,}'                                                       }
-    @{ Name='Anthropic Key';     Pattern='sk-ant-[a-zA-Z0-9\-_]{20,}'                                                    }
-    @{ Name='Google API Key';    Pattern='AIza[0-9A-Za-z\-_]{35}'                                                        }
-    @{ Name='GitHub PAT';        Pattern='gh[psor]_[a-zA-Z0-9]{36}'                                                      }
-    @{ Name='AWS Access Key';    Pattern='AKIA[0-9A-Z]{16}'                                                               }
-    @{ Name='AWS Secret Key';    Pattern='(?i)aws.{0,20}secret.{0,20}[''"]?[a-zA-Z0-9+/]{40}'                           }
-    @{ Name='Stripe Live Key';   Pattern='sk_live_[a-zA-Z0-9]{24,}'                                                      }
-    @{ Name='Stripe Pub Key';    Pattern='pk_live_[a-zA-Z0-9]{24,}'                                                      }
-    @{ Name='SendGrid Key';      Pattern='SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}'                                   }
-    @{ Name='Twilio SID';        Pattern='AC[a-zA-Z0-9]{32}'                                                             }
-    @{ Name='Slack Token';       Pattern='xox[baprs]-[0-9A-Za-z\-]+'                                                     }
-    @{ Name='JWT Token';         Pattern='eyJ[a-zA-Z0-9+/\-_]{10,}\.[a-zA-Z0-9+/\-_]{10,}\.[a-zA-Z0-9+/\-_]{10,}'     }
-    @{ Name='Private Key Block'; Pattern='-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'                          }
-    @{ Name='Azure Key';         Pattern='(?i)AccountKey=[a-zA-Z0-9+/]{88}=='                                            }
-    @{ Name='NPM Token';         Pattern='npm_[a-zA-Z0-9]{36}'                                                           }
-    @{ Name='Telegram Bot';      Pattern='[0-9]{8,10}:[a-zA-Z0-9_\-]{35}'                                               }
-    @{ Name='DB Connection';     Pattern='(?i)(mongodb|postgresql|mysql|redis)://[^:\s]+:[^@\s]{6,}@'                    }
-    @{ Name='Generic API Key';   Pattern='(?i)(api_?key|apikey|access_?token|auth_?token|client_?secret)\s*[=:]\s*[''"]?[a-zA-Z0-9+/\-_]{16,}' }
-    @{ Name='Generic Password';  Pattern='(?i)(password|passwd|pwd)\s*[=:]\s*[''"]?[^\s''"\n]{8,}[''"]?'                }
-    @{ Name='Generic Secret';    Pattern='(?i)secret\s*[=:]\s*[''"]?[a-zA-Z0-9+/\-_]{16,}[''"]?'                       }
+    @{ Name='OpenAI Key';        Pattern='sk-[a-zA-Z0-9T_\-]{20,}';                          Confidence=0.95; FalsePositiveRate=0.02; Severity='CRITICAL' }
+    @{ Name='Anthropic Key';     Pattern='sk-ant-[a-zA-Z0-9\-_]{20,}';                       Confidence=0.95; FalsePositiveRate=0.02; Severity='CRITICAL' }
+    @{ Name='Google API Key';    Pattern='AIza[0-9A-Za-z\-_]{35}';                           Confidence=0.90; FalsePositiveRate=0.05; Severity='HIGH' }
+    @{ Name='GitHub PAT';        Pattern='gh[psor]_[a-zA-Z0-9]{36}';                         Confidence=0.98; FalsePositiveRate=0.01; Severity='CRITICAL' }
+    @{ Name='AWS Access Key';    Pattern='AKIA[0-9A-Z]{16}';                                 Confidence=0.98; FalsePositiveRate=0.01; Severity='CRITICAL' }
+    @{ Name='AWS Secret Key';    Pattern='(?i)aws.{0,20}secret.{0,20}[''"][a-zA-Z0-9+/]{40}'; Confidence=0.85; FalsePositiveRate=0.10; Severity='CRITICAL' }
+    @{ Name='Stripe Live Key';   Pattern='sk_live_[a-zA-Z0-9]{24,}';                         Confidence=0.97; FalsePositiveRate=0.01; Severity='CRITICAL' }
+    @{ Name='Stripe Pub Key';    Pattern='pk_live_[a-zA-Z0-9]{24,}';                         Confidence=0.80; FalsePositiveRate=0.15; Severity='MEDIUM' }
+    @{ Name='SendGrid Key';      Pattern='SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}';      Confidence=0.96; FalsePositiveRate=0.02; Severity='HIGH' }
+    @{ Name='Twilio SID';        Pattern='AC[a-zA-Z0-9]{32}';                                Confidence=0.92; FalsePositiveRate=0.05; Severity='HIGH' }
+    @{ Name='Slack Token';       Pattern='xox[baprs]-[0-9A-Za-z\-]+';                        Confidence=0.94; FalsePositiveRate=0.03; Severity='HIGH' }
+    @{ Name='JWT Token';         Pattern='eyJ[a-zA-Z0-9+/\-_]{10,}\.[a-zA-Z0-9+/\-_]{10,}\.[a-zA-Z0-9+/\-_]{10,}'; Confidence=0.75; FalsePositiveRate=0.20; Severity='MEDIUM' }
+    @{ Name='Private Key Block'; Pattern='-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'; Confidence=0.99; FalsePositiveRate=0.005; Severity='CRITICAL' }
+    @{ Name='Azure Key';         Pattern='(?i)AccountKey=[a-zA-Z0-9+/]{88}==';               Confidence=0.93; FalsePositiveRate=0.04; Severity='HIGH' }
+    @{ Name='NPM Token';         Pattern='npm_[a-zA-Z0-9]{36}';                              Confidence=0.96; FalsePositiveRate=0.02; Severity='HIGH' }
+    @{ Name='Telegram Bot';      Pattern='[0-9]{8,10}:[a-zA-Z0-9_\-]{35}';                   Confidence=0.88; FalsePositiveRate=0.08; Severity='HIGH' }
+    @{ Name='DB Connection';     Pattern='(?i)(mongodb|postgresql|mysql|redis)://[^:\s]+:[^@\s]{6,}@'; Confidence=0.90; FalsePositiveRate=0.05; Severity='CRITICAL' }
+    @{ Name='Generic API Key';   Pattern="(?i)(api_?key|apikey|access_?token|auth_?token|client_?secret)\s*[=:]\s*['""]?[a-zA-Z0-9+/\-_]{16,}"; Confidence=0.70; FalsePositiveRate=0.25; Severity='MEDIUM' }
+    @{ Name='Generic Password';  Pattern="(?i)(password|passwd|pwd)\s*[=:]\s*['""]?[^\s'""\n]{8,}['""]?"; Confidence=0.65; FalsePositiveRate=0.30; Severity='MEDIUM' }
+    @{ Name='Generic Secret';    Pattern="(?i)secret\s*[=:]\s*['""]?[a-zA-Z0-9+/\-_]{16,}['""]?"; Confidence=0.68; FalsePositiveRate=0.28; Severity='MEDIUM' }
+    @{ Name='Firebase API Key';  Pattern='AIza[0-9A-Za-z\-_]{35}';                           Confidence=0.88; FalsePositiveRate=0.08; Severity='HIGH' }
+    @{ Name='Mailgun Key';       Pattern='key-[a-zA-Z0-9]{32}';                              Confidence=0.92; FalsePositiveRate=0.04; Severity='HIGH' }
+    @{ Name='DataDog Token';     Pattern='dd[a-zA-Z0-9]{32}';                                Confidence=0.90; FalsePositiveRate=0.05; Severity='HIGH' }
 )
 
+# Allowlist patterns (known false positives)
+$defaultAllowlist = @(
+    'example\.com',
+    'test[-_]?key',
+    'placeholder',
+    'changeme',
+    'your[_-]?(?:api[_-]?key|secret|password|token)',
+    '\$\{.*\}',              # Environment variable references ${VAR}
+    'process\.env\.',        # Node.js env references
+    'os\.environ',           # Python env references
+    'System\.Environment',   # .NET env references
+    'fake[-_]?',
+    'dummy[-_]?',
+    'sample[-_]?',
+    'mock[-_]?',
+    'sk-xxxxxxxx',
+    'AKIAIOSFODNN7EXAMPLE',
+    'eyJa.bGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example.signature',
+    'localhost',
+    '127\.0\.0\.1',
+    '0\.0\.0\.0'
+)
+
+$allowlistOptions = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+$allowlistRegex = [System.Text.RegularExpressions.Regex]::new(($defaultAllowlist + $AllowlistPatterns -join '|'), $allowlistOptions)
+
 # ============================================================
-#  PROJECT SIGNATURES & ENTRY POINTS
+# PROJECT SIGNATURES & ENTRY POINTS
 # ============================================================
 
 $projectSignatures = [ordered]@{
@@ -253,7 +352,78 @@ $llmLimits = [ordered]@{
 }
 
 # ============================================================
-#  UI HELPERS
+# CACHE MANAGEMENT
+# ============================================================
+
+function Initialize-Cache {
+    param([string]$ProjectRoot)
+    
+    $cacheDir = Join-Path $ProjectRoot ".bundle-cache"
+    if (-not (Test-Path $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    }
+    
+    $script:cachePath = Join-Path $cacheDir "analysis-cache.json"
+    
+    if (Test-Path $script:cachePath) {
+        return Get-Content $script:cachePath | ConvertFrom-Json -Depth 10
+    }
+    
+    return @{
+        GeneratedAt = Get-Date -Format "o"
+        ProjectRoot = $ProjectRoot
+        Files = @{}
+        DependencyGraph = @{ Nodes = @(); Edges = @() }
+    }
+}
+
+function Get-CachedAnalysis {
+    param([string]$FilePath, [datetime]$LastModified)
+    
+    if (-not $EnableCache -or -not (Test-Path $script:cachePath)) {
+        return $null
+    }
+    
+    $cache = Get-Content $script:cachePath | ConvertFrom-Json -Depth 10
+    
+    if ($cache.Files.ContainsKey($FilePath)) {
+        $cached = $cache.Files[$FilePath]
+        $cachedTime = [datetime]::Parse($cached.LastModified)
+        
+        if ($cachedTime -eq $LastModified) {
+            Write-Status "[CACHE]" "Hit: $(Split-Path $FilePath -Leaf)" "Green" "Gray"
+            return $cached.Analysis
+        }
+    }
+    
+    return $null
+}
+
+function Update-Cache {
+    param([string]$FilePath, [datetime]$LastModified, $Analysis)
+    
+    if (-not $EnableCache) { return }
+    
+    $cache = if (Test-Path $script:cachePath) {
+        Get-Content $script:cachePath | ConvertFrom-Json -Depth 10
+    } else {
+        @{
+            GeneratedAt = Get-Date -Format "o"
+            ProjectRoot = $ProjectRoot
+            Files = @{}
+        }
+    }
+    
+    $cache.Files[$FilePath] = @{
+        LastModified = $LastModified.ToString("o")
+        Analysis = $Analysis
+    }
+    
+    $cache | ConvertTo-Json -Depth 10 | Set-Content $script:cachePath -Encoding UTF8
+}
+
+# ============================================================
+# UI HELPERS
 # ============================================================
 
 function Write-Banner {
@@ -263,1305 +433,1517 @@ function Write-Banner {
     $bottom  = "  ╚" + ("═" * $W) + "╝"
     $empty   = "  ║" + (" " * $W) + "║"
 
-    Write-Host ""; Write-Host $border -ForegroundColor DarkRed; Write-Host $empty -ForegroundColor DarkRed
+    Write-Host ""; Write-Host $border -ForegroundColor Cyan; Write-Host $empty -ForegroundColor Cyan
 
-    $art = @(
-        @{ T="    ██████╗ ██╗   ██╗███╗   ██╗██████╗ ██╗     ███████╗    "; C="Red"     }
-        @{ T="    ██╔══██╗██║   ██║████╗  ██║██╔══██╗██║     ██╔════╝    "; C="Red"     }
-        @{ T="    ██████╔╝██║   ██║██╔██╗ ██║██║  ██║██║     █████╗      "; C="Red"     }
-        @{ T="    ██╔══██╗██║   ██║██║╚██╗██║██║  ██║██║     ██╔══╝      "; C="DarkRed" }
-        @{ T="    ██████╔╝╚██████╔╝██║ ╚████║██████╔╝███████╗███████╗    "; C="DarkRed" }
-        @{ T="    ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝    "; C="DarkRed" }
-    )
-    foreach ($l in $art) {
-        $pad = $W - $l.T.Length
-        Write-Host "  ║" -ForegroundColor DarkRed -NoNewline
-        Write-Host $l.T -ForegroundColor $l.C -NoNewline
-        Write-Host (" " * [Math]::Max(0,$pad)) -NoNewline
-        Write-Host "║" -ForegroundColor DarkRed
+    $title = "   ██████╗ ██╗   ██╗██████╗ ███████╗██████╗ ███████╗    "
+    $sub1  = "   ██╔══██╗██║   ██║██╔══██╗██╔════╝██╔══██╗██╔════╝    "
+    $sub2  = "   ██████╔╝██║   ██║██████╔╝█████╗  ██████╔╝█████╗      "
+    $sub3  = "   ██╔══██╗██║   ██║██╔══██╗██╔══╝  ██╔══██╗██╔══╝      "
+    $sub4  = "   ██████╔╝╚██████╔╝██║  ██║███████╗██║  ██║███████╗    "
+    $sub5  = "   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝    "
+    $ver   = "   Project Intelligence Packager v$($script:VERSION)                      "
+
+    foreach ($line in @($title, $sub1, $sub2, $sub3, $sub4, $sub5)) {
+        $pad = $W - $line.Length
+        Write-Host "  ║" -ForegroundColor Cyan -NoNewline
+        Write-Host $line -ForegroundColor Cyan -NoNewline
+        Write-Host (" " * [Math]::Max(0, $pad)) -NoNewline
+        Write-Host "║" -ForegroundColor Cyan
     }
 
-    Write-Host $empty -ForegroundColor DarkRed; Write-Host $divider -ForegroundColor DarkRed
+    Write-Host $empty -ForegroundColor Cyan
+    Write-Host $divider -ForegroundColor Cyan
 
-    $foot = "   Project Intelligence Packager $([char]0xB7) v$($script:VERSION) $([char]0xB7) LLM-Ready Code Bundler"
-    $fpad = $W - $foot.Length
-    Write-Host "  ║" -ForegroundColor DarkRed -NoNewline
-    Write-Host $foot -ForegroundColor Gray -NoNewline
-    Write-Host (" " * [Math]::Max(0,$fpad)) -NoNewline
-    Write-Host "║" -ForegroundColor DarkRed
+    $fpad = $W - $ver.Length
+    Write-Host "  ║" -ForegroundColor Cyan -NoNewline
+    Write-Host $ver -ForegroundColor Gray -NoNewline
+    Write-Host (" " * [Math]::Max(0, $fpad)) -NoNewline
+    Write-Host "║" -ForegroundColor Cyan
 
-    Write-Host $bottom -ForegroundColor DarkRed; Write-Host ""
+    Write-Host $bottom -ForegroundColor Cyan; Write-Host ""
 }
 
 function Write-Status {
     param([string]$Tag, [string]$Message, [string]$TagColor="DarkGray", [string]$MsgColor="Gray")
+    if ($Quiet) { return }
     Write-Host "  " -NoNewline
-    Write-Host $Tag.PadRight(10) -ForegroundColor $TagColor -NoNewline
+    Write-Host $Tag.PadRight(12) -ForegroundColor $TagColor -NoNewline
     Write-Host " $Message" -ForegroundColor $MsgColor
 }
 
-function Write-Sep { Write-Host ("  " + "─" * 68) -ForegroundColor DarkGray }
+function Write-Sep { 
+    if ($Quiet) { return }
+    Write-Host ("  " + "─" * 68) -ForegroundColor DarkGray 
+}
 
 function Write-SectionHeader {
     param([string]$Title)
-    Write-Host ""; Write-Host "  ┌─ $Title " -ForegroundColor DarkRed -NoNewline
+    if ($Quiet) { return }
+    Write-Host ""
+    Write-Host "  ┌─ $Title " -ForegroundColor Cyan -NoNewline
     Write-Host ("─" * [Math]::Max(2, 65 - $Title.Length)) -ForegroundColor DarkGray
 }
 
-# ============================================================
-#  DRIVE DETECTION (with network timeout)
-# ============================================================
-
-function Get-AvailableDrives {
-    $drives = [System.Collections.Generic.List[string]]::new()
-
-    try {
-        Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {
-            $root = $_.Root
-            if (-not $root) { return }
-
-            # Test reachability with a 2-second timeout job
-            $job = Start-Job -ScriptBlock { param($r) Test-Path $r -ErrorAction SilentlyContinue } -ArgumentList $root
-            $done = Wait-Job $job -Timeout 2
-            if ($done) {
-                $ok = Receive-Job $job -ErrorAction SilentlyContinue
-                if ($ok) { $drives.Add($root) }
-                else { Write-Status "SKIP" "Drive $root not accessible" "DarkGray" "DarkGray" }
-            } else {
-                Stop-Job $job
-                Write-Status "SKIP" "Drive $root timed out (network/slow drive)" "Yellow" "DarkYellow"
-            }
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-        }
-    } catch {
-        $script:errorLog.Add("Drive detection error: $($_.Exception.Message)")
-    }
-
-    if ($drives.Count -eq 0) { $drives.Add("C:\") }
-    return ($drives | Sort-Object -Unique)
+function Write-Progress-Bar {
+    param([int]$Current, [int]$Total, [string]$Activity)
+    if ($Quiet) { return }
+    
+    $percent = [Math]::Min(100, ($Current / [Math]::Max(1, $Total)) * 100)
+    $completed = [Math]::Floor($percent / 2)
+    $remaining = 50 - $completed
+    
+    $bar = "[" + ("█" * $completed) + ("░" * $remaining) + "]"
+    Write-Host "`r  Progress: $bar $($percent.ToString("F1"))% ($Current/$Total) $Activity" -NoNewline -ForegroundColor Green
 }
 
 # ============================================================
-#  GITIGNORE PARSER
-# ============================================================
-
-function Get-GitIgnorePatterns {
-    param([string]$Root)
-    $patterns = [System.Collections.Generic.List[hashtable]]::new()
-
-    $giFiles = @()
-    $rootGI = [System.IO.Path]::Combine($Root, ".gitignore")
-    if (Test-Path $rootGI -ErrorAction SilentlyContinue) {
-        $giFiles += @{ File = $rootGI; Base = $Root }
-    }
-    try {
-        Get-ChildItem -Path $Root -Filter ".gitignore" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.DirectoryName -ne $Root } |
-            ForEach-Object { $giFiles += @{ File = $_.FullName; Base = $_.DirectoryName } }
-    } catch {}
-
-    foreach ($gi in $giFiles) {
-        try {
-            Get-Content -Path $gi.File -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object {
-                $line = $_.Trim()
-                if ($line -eq '' -or $line.StartsWith('#')) { return }
-                $negated = $line.StartsWith('!')
-                if ($negated) { $line = $line.Substring(1) }
-                $dirOnly = $line.EndsWith('/')
-                if ($dirOnly) { $line = $line.TrimEnd('/') }
-                $anchored = $line.StartsWith('/')
-                if ($anchored) { $line = $line.TrimStart('/') }
-                # Convert gitignore glob → PS wildcard
-                $psPattern = $line -replace '\*\*[/\\]', '*' -replace '\*\*', '*'
-                $patterns.Add(@{ Pattern=$psPattern; Negated=$negated; DirOnly=$dirOnly; Anchored=$anchored; Base=$gi.Base })
-            }
-        } catch { $script:errorLog.Add("Cannot read .gitignore at $($gi.File): $($_.Exception.Message)") }
-    }
-    return $patterns
-}
-
-function Test-GitIgnored {
-    param([System.IO.FileSystemInfo]$Item, [string]$Root, $Patterns)
-    if (-not $Patterns -or $Patterns.Count -eq 0) { return $false }
-    $sep = [System.IO.Path]::DirectorySeparatorChar
-    $rel = $Item.FullName.Substring($Root.Length).TrimStart($sep,'/').Replace('\','/')
-    $name = $Item.Name
-    $isDir = $Item.PSIsContainer
-    $ignored = $false
-    foreach ($p in $Patterns) {
-        if ($p.DirOnly -and -not $isDir) { continue }
-        $pat = $p.Pattern
-        $matched = $false
-        if ($p.Anchored) {
-            $relToBase = $Item.FullName.Substring($p.Base.Length).TrimStart($sep,'/').Replace('\','/')
-            $matched = ($relToBase -like $pat) -or ($relToBase -like "$pat/*")
-        } else {
-            $matched = ($name -like $pat) -or ($rel -like $pat) -or ($rel -like "*/$pat") -or ($rel -like "*/$pat/*")
-        }
-        if ($matched) { $ignored = if ($p.Negated) { $false } else { $true } }
-    }
-    return $ignored
-}
-
-# ============================================================
-#  GIT METADATA
-# ============================================================
-
-function Get-GitMetadata {
-    param([string]$Root)
-    $git = @{
-        Available    = $false
-        Branch       = ""
-        LastCommit   = ""
-        Author       = ""
-        Remote       = ""
-        ChangedFiles = @()
-        TotalCommits = ""
-        HasGitDir    = (Test-Path ([System.IO.Path]::Combine($Root,".git")) -ErrorAction SilentlyContinue)
-    }
-    if (-not $git.HasGitDir) { return $git }
-
-    try {
-        $null = & git --version 2>$null
-        if ($LASTEXITCODE -ne 0) { return $git }
-        $git.Available = $true
-
-        Push-Location $Root
-        $git.Branch       = (& git branch --show-current 2>$null) | Select-Object -First 1
-        $git.LastCommit   = (& git log -1 --pretty=format:"%h — %s (%ar)" 2>$null) | Select-Object -First 1
-        $git.Author       = (& git log -1 --pretty=format:"%an <%ae>" 2>$null) | Select-Object -First 1
-        $git.Remote       = (& git remote get-url origin 2>$null) | Select-Object -First 1
-        $git.TotalCommits = (& git rev-list --count HEAD 2>$null) | Select-Object -First 1
-        $git.ChangedFiles = @(& git status --short 2>$null | Where-Object { $_ -match '^\s*\S' })
-        Pop-Location
-    } catch {
-        try { Pop-Location } catch {}
-        $script:errorLog.Add("Git metadata error: $($_.Exception.Message)")
-    }
-    return $git
-}
-
-# ============================================================
-#  PROJECT INTELLIGENCE
-# ============================================================
-
-function Get-ProjectType {
-    param([string]$Root)
-    $result = @{ Type="Unknown"; Framework=""; EntryPoint=""; IsGitRepo=$false }
-
-    foreach ($sig in $projectSignatures.GetEnumerator()) {
-        foreach ($f in $sig.Value) {
-            $checkPath = [System.IO.Path]::Combine($Root, $f)
-            $found = $false
-            if ($f.Contains('*')) {
-                $found = (Get-ChildItem -Path $Root -Filter $f -ErrorAction SilentlyContinue | Select-Object -First 1) -ne $null
-            } else {
-                $found = Test-Path $checkPath -ErrorAction SilentlyContinue
-            }
-            if ($found) {
-                $result.Type      = $sig.Key
-                $result.Framework = $sig.Key
-                # Check for tighter framework match on package.json
-                if ($sig.Key -eq 'Node.js' -or $sig.Key -eq 'React') {
-                    $pkgPath = [System.IO.Path]::Combine($Root, "package.json")
-                    if (Test-Path $pkgPath -ErrorAction SilentlyContinue) {
-                        try {
-                            $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
-                            $deps = @()
-                            if ($pkg.dependencies)    { $deps += $pkg.dependencies.PSObject.Properties.Name }
-                            if ($pkg.devDependencies) { $deps += $pkg.devDependencies.PSObject.Properties.Name }
-                            if ('next'        -in $deps) { $result.Framework = 'Next.js' }
-                            elseif ('nuxt'    -in $deps) { $result.Framework = 'Nuxt' }
-                            elseif ('@angular/core' -in $deps) { $result.Framework = 'Angular' }
-                            elseif ('svelte'  -in $deps) { $result.Framework = 'SvelteKit' }
-                            elseif ('vue'     -in $deps) { $result.Framework = 'Vue' }
-                            elseif ('react'   -in $deps) { $result.Framework = 'React' }
-                            if ($pkg.main) { $result.EntryPoint = $pkg.main }
-                        } catch {}
-                    }
-                }
-                # Detect Django vs Flask vs FastAPI
-                if ($sig.Key -in @('Django','FastAPI','Flask')) {
-                    $result.Type = 'Python'; $result.Framework = $sig.Key
-                }
-                break
-            }
-        }
-        if ($result.Type -ne "Unknown") { break }
-    }
-
-    # Entry point detection
-    if (-not $result.EntryPoint) {
-        $frameworkEPs = $entryPoints[$result.Framework]
-        if (-not $frameworkEPs) { $frameworkEPs = $entryPoints[$result.Type] }
-        if ($frameworkEPs) {
-            foreach ($ep in $frameworkEPs) {
-                $epPath = [System.IO.Path]::Combine($Root, $ep.Replace('/','\'))
-                if (Test-Path $epPath -ErrorAction SilentlyContinue) {
-                    $result.EntryPoint = $ep; break
-                }
-            }
-        }
-    }
-
-    $result.IsGitRepo = Test-Path ([System.IO.Path]::Combine($Root,".git")) -ErrorAction SilentlyContinue
-    return $result
-}
-
-function Get-LanguageStats {
-    param([System.Collections.Generic.List[System.IO.FileInfo]]$Files)
-    $stats = @{}
-    $totalSize = 0L
-    foreach ($f in $Files) {
-        $ext = $f.Extension.ToLower()
-        if (-not $ext) { $ext = "[none]" }
-        if (-not $stats.ContainsKey($ext)) { $stats[$ext] = 0L }
-        $stats[$ext] += $f.Length
-        $totalSize += $f.Length
-    }
-    if ($totalSize -eq 0) { return @() }
-    $result = @()
-    foreach ($kv in ($stats.GetEnumerator() | Sort-Object Value -Descending)) {
-        $pct = [math]::Round(($kv.Value / $totalSize) * 100, 1)
-        $lang = $languageMap[$kv.Key]
-        if (-not $lang) { $lang = $kv.Key.TrimStart('.').ToUpper() }
-        else { $lang = (Get-Culture).TextInfo.ToTitleCase($lang) }
-        $result += @{ Ext=$kv.Key; Language=$lang; Pct=$pct; Bytes=$kv.Value }
-    }
-    return $result
-}
-
-function Get-EntryPointLabel {
-    param([string]$Root, [string]$EntryPoint, [string]$Framework)
-    if ($EntryPoint) { return $EntryPoint }
-    return "(auto-detect failed — check package.json or main file)"
-}
-
-# ============================================================
-#  SECRET SCANNER
-# ============================================================
-
-function Invoke-SecretScan {
-    param([string]$Content, [string]$RelPath)
-    $findings = [System.Collections.Generic.List[hashtable]]::new()
-    foreach ($sp in $secretPatterns) {
-        try {
-            $matches = [regex]::Matches($Content, $sp.Pattern)
-            foreach ($m in $matches) {
-                $findings.Add(@{ Name=$sp.Name; File=$RelPath; Match=$m.Value.Substring(0,[Math]::Min($m.Value.Length,40)) })
-                $script:secretsFound.Add(@{ Name=$sp.Name; File=$RelPath })
-            }
-        } catch {}
-    }
-    return $findings
-}
-
-function Invoke-SecretRedact {
-    param([string]$Content)
-    foreach ($sp in $secretPatterns) {
-        try { $Content = [regex]::Replace($Content, $sp.Pattern, "[REDACTED:$($sp.Name)]") } catch {}
-    }
-    return $Content
-}
-
-# ============================================================
-#  ENCODING DETECTION
+# ENCODING DETECTION
 # ============================================================
 
 function Get-FileEncoding {
     param([string]$Path)
+    
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 2) { return 'UTF-8' }
+    
+    # Check for BOM
+    if ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { return 'UTF-16LE' }
+    if ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) { return 'UTF-16BE' }
+    if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return 'UTF-8' }
+    
+    # Heuristic: check for null bytes (indicates UTF-16)
+    $nullRatio = ($bytes | Where-Object { $_ -eq 0 }).Count / $bytes.Length
+    if ($nullRatio -gt 0.3) { return 'UTF-16LE' }
+    
+    # Try UTF-8 first, fallback to Windows-1252
     try {
-        $bytes = New-Object byte[] 4
-        $stream = [System.IO.File]::OpenRead($Path)
-        $read = $stream.Read($bytes,0,4)
-        $stream.Close()
-        # BOM detection
-        if ($read -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-            return [System.Text.Encoding]::UTF8
-        }
-        if ($read -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-            return [System.Text.Encoding]::Unicode   # UTF-16 LE
-        }
-        if ($read -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-            return [System.Text.Encoding]::BigEndianUnicode
-        }
-        # Default: try UTF-8, fall back to Windows-1252
-        return [System.Text.Encoding]::UTF8
+        $utf8 = [System.Text.Encoding]::UTF8
+        $utf8.GetString($bytes) | Out-Null
+        return 'UTF-8'
     } catch {
-        return [System.Text.Encoding]::UTF8
+        return 'Windows-1252'
     }
 }
 
-function Read-FileContent {
+function Get-FileContent {
     param([string]$Path)
-    $enc = Get-FileEncoding -Path $Path
+    
+    $encoding = Get-FileEncoding -Path $Path
+    
     try {
-        return [System.IO.File]::ReadAllText($Path, $enc)
+        switch ($encoding) {
+            'UTF-8' { return Get-Content $Path -Raw -Encoding UTF8 }
+            'UTF-16LE' { return Get-Content $Path -Raw -Encoding Unicode }
+            'UTF-16BE' { 
+                $bytes = [System.IO.File]::ReadAllBytes($Path)
+                return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes)
+            }
+            default { return Get-Content $Path -Raw -Encoding Default }
+        }
     } catch {
+        $script:errorLog.Add("Failed to read $Path : $_")
+        return $null
+    }
+}
+
+# ============================================================
+# DEPENDENCY EXTRACTION (AST-AWARE)
+# ============================================================
+
+function Extract-Dependencies {
+    param([string]$Content, [string]$Extension)
+    
+    $language = $languageMap[$Extension]
+    if (-not $language) { return @() }
+    
+    $profile = $LinguisticProfiles[$language]
+    if (-not $profile) { return @() }
+    
+    $imports = @()
+    
+    foreach ($pattern in $profile.ImportPatterns) {
         try {
-            # Fallback: Windows-1252 (covers Latin-1 / legacy files)
-            $fallback = [System.Text.Encoding]::GetEncoding(1252)
-            return [System.IO.File]::ReadAllText($Path, $fallback)
+            $matches = [regex]::Matches($Content, $pattern, 'Multiline,IgnoreCase')
+            foreach ($match in $matches) {
+                # Get the first capture group (the actual import path)
+                if ($match.Groups.Count -gt 1) {
+                    $importPath = $match.Groups[1].Value
+                    if ($importPath -and -not $imports.Contains($importPath)) {
+                        $imports += $importPath
+                    }
+                }
+            }
         } catch {
-            $script:errorLog.Add("Cannot read: $Path — $($_.Exception.Message)")
-            return $null
+            # Regex failed, continue
         }
     }
+    
+    return $imports | Sort-Object -Unique
 }
 
-# ============================================================
-#  BINARY DETECTION (extension-first, then byte-scan)
-# ============================================================
-
-$knownTextExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($e in $includeExtensions) { [void]$knownTextExtensions.Add($e) }
-
-function Test-IsBinaryFile {
-    param([System.IO.FileInfo]$File)
-    # Fast path: if extension is in our known-text set, trust it
-    if ($knownTextExtensions.Contains($File.Extension)) { return $false }
-    # Byte scan only for extensionless or ambiguous files
-    try {
-        $stream = [System.IO.File]::OpenRead($File.FullName)
-        $buf = New-Object byte[] 4096
-        $n = $stream.Read($buf, 0, $buf.Length)
-        $stream.Close()
-        for ($i = 0; $i -lt $n; $i++) { if ($buf[$i] -eq 0) { return $true } }
-        return $false
-    } catch { return $true }
-}
-
-# ============================================================
-#  TOKEN ESTIMATION (weighted per file type)
-# ============================================================
-
-function Get-TokenEstimate {
-    param([long]$Chars, [string]$Extension="", [string]$Content="")
-    if ($Chars -eq 0) { return 0L }
-
-    # Detect high non-ASCII ratio (Arabic, CJK, etc.)
-    $nonAsciiRatio = 0.0
-    if ($Content.Length -gt 0) {
-        $sample = $Content.Substring(0, [Math]::Min(500, $Content.Length))
-        $nonAscii = ($sample.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count
-        $nonAsciiRatio = $nonAscii / [Math]::Max(1, $sample.Length)
+function Extract-Exports {
+    param([string]$Content, [string]$Extension)
+    
+    $language = $languageMap[$Extension]
+    if (-not $language) { return @() }
+    
+    $profile = $LinguisticProfiles[$language]
+    if (-not $profile) { return @() }
+    
+    $exports = @()
+    
+    foreach ($pattern in $profile.ExportPatterns) {
+        try {
+            $matches = [regex]::Matches($Content, $pattern, 'Multiline')
+            foreach ($match in $matches) {
+                if ($match.Groups.Count -gt 1) {
+                    $exportName = $match.Groups[1].Value
+                    if ($exportName) {
+                        $exports += @{ Name = $exportName; Type = 'export' }
+                    }
+                }
+            }
+        } catch {
+            # Regex failed, continue
+        }
     }
-
-    if ($nonAsciiRatio -gt 0.2) { return [long]($Chars / 3.5) }   # Arabic/CJK: more tokens per char
-
-    $ratio = switch -Regex ($Extension.ToLower()) {
-        '^\.json$|^\.xml$|^\.xsd$'                        { 3.0; break }
-        '^\.min\.'                                         { 2.5; break }
-        '^\.yml$|^\.yaml$|^\.toml$|^\.ini$|^\.cfg$'       { 5.0; break }
-        '^\.md$|^\.markdown$|^\.rst$|^\.txt$'              { 5.0; break }
-        '^\.html$|^\.htm$'                                 { 4.0; break }
-        '^\.css$|^\.scss$|^\.sass$|^\.less$'               { 4.5; break }
-        '^\.sql$|^\.ddl$'                                  { 3.5; break }
-        default                                            { 4.0 }
-    }
-    return [long]($Chars / $ratio)
-}
-
-function Format-Tokens {
-    param([long]$T)
-    if ($T -lt 1000)    { return "$T tokens" }
-    if ($T -lt 1000000) { return "$([math]::Round($T/1000,1))K tokens" }
-    return "$([math]::Round($T/1000000,2))M tokens"
+    
+    return $exports
 }
 
 # ============================================================
-#  LOGICAL FILE ORDERING
+# COMPLEXITY & QUALITY METRICS
+# ============================================================
+
+function Get-CyclomaticComplexity {
+    param([string]$Content, [string]$Extension)
+    
+    $language = $languageMap[$Extension]
+    if (-not $language) { return 1 }
+    
+    $profile = $LinguisticProfiles[$language]
+    if (-not $profile) { return 1 }
+    
+    $branchPoints = 0
+    foreach ($keyword in $profile.ComplexityKeywords) {
+        $matches = [regex]::Matches($Content, "\b$keyword\b")
+        $branchPoints += $matches.Count
+    }
+    
+    return $branchPoints + 1  # Base complexity
+}
+
+function Get-CodeMetrics {
+    param([string]$Content, [string]$FilePath)
+    
+    $lines = $Content -split "`n"
+    $totalLines = $lines.Count
+    $blankLines = ($lines | Where-Object { $_ -match '^\s*$' }).Count
+    $commentLines = 0
+    $inBlockComment = $false
+    
+    foreach ($line in $lines) {
+        if ($line -match '^\s*(//|#|/\*|\*)') {
+            $commentLines++
+        } elseif ($line -match '/\*') {
+            $inBlockComment = $true
+            $commentLines++
+        } elseif ($line -match '\*/' -and $inBlockComment) {
+            $inBlockComment = $false
+            $commentLines++
+        } elseif ($inBlockComment) {
+            $commentLines++
+        }
+    }
+    
+    $codeLines = $totalLines - $blankLines - $commentLines
+    
+    # Detect duplicate lines (simple hash-based)
+    $lineHashes = @{}
+    $duplicatePairs = 0
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $trimmed = $line.Trim()
+        $hash = Get-StringHash -Input $trimmed
+        if ($lineHashes.ContainsKey($hash)) {
+            $duplicatePairs++
+        } else {
+            $lineHashes[$hash] = 1
+        }
+    }
+    
+    $duplicationRatio = if ($totalLines -gt 0) { 
+        [Math]::Round($duplicatePairs / $totalLines, 3) 
+    } else { 0 }
+    
+    return @{
+        TotalLines = $totalLines
+        BlankLines = $blankLines
+        CommentLines = $commentLines
+        CodeLines = $codeLines
+        CommentRatio = [Math]::Round($commentLines / [Math]::Max(1, $codeLines), 2)
+        DuplicatePairs = $duplicatePairs
+        DuplicationRatio = $duplicationRatio
+    }
+}
+
+function Get-StringHash {
+    param([string]$Input)
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Input)
+    $hash = $md5.ComputeHash($bytes)
+    return [System.BitConverter]::ToString($hash).Replace('-', '').ToLower()
+}
+
+# ============================================================
+# SECURITY SCANNING WITH CONFIDENCE SCORING
+# ============================================================
+
+function Invoke-SecretScan {
+    param(
+        [string]$Content,
+        [string]$FilePath,
+        [string]$RelativePath
+    )
+    
+    $findings = @()
+    
+    foreach ($pattern in $secretPatterns) {
+        try {
+            $regex = New-Object System.Text.RegularExpressions.Regex $pattern.Pattern, 'Compiled'
+            $matches = $regex.Matches($Content)
+            
+            foreach ($match in $matches) {
+                $matchedText = $match.Value
+                
+                # Check against allowlist
+                if ($allowlistRegex.IsMatch($matchedText)) {
+                    Write-Status "[ALLOW]" "Skipped: $($pattern.Name) in $(Split-Path $RelativePath -Leaf)" "Yellow" "Gray"
+                    continue
+                }
+                
+                # Calculate adjusted confidence
+                $adjustedConfidence = $pattern.Confidence
+                
+                # Reduce confidence for short matches
+                if ($matchedText.Length -lt 20) {
+                    $adjustedConfidence *= 0.8
+                }
+                
+                # Reduce confidence for common false positive contexts
+                if ($Content.Substring([Math]::Max(0, $match.Index - 50), [Math]::Min(50, $match.Index)) -match '(example|test|fake|dummy|placeholder)') {
+                    $adjustedConfidence *= 0.6
+                }
+                
+                $finding = @{
+                    PatternName = $pattern.Name
+                    FilePath = $FilePath
+                    RelativePath = $RelativePath
+                    Line = ($Content.Substring(0, $match.Index) -split "`n").Count
+                    MatchPreview = $matchedText.Substring(0, [Math]::Min(40, $matchedText.Length)) + "..."
+                    Confidence = [Math]::Round($adjustedConfidence, 2)
+                    FalsePositiveRate = $pattern.FalsePositiveRate
+                    Severity = $pattern.Severity
+                    RawMatch = $matchedText
+                }
+                
+                $findings += $finding
+                $script:secretsFound.Add($finding)
+                
+                $severityColor = switch ($pattern.Severity) {
+                    'CRITICAL' { 'Red' }
+                    'HIGH' { 'Orange' }
+                    'MEDIUM' { 'Yellow' }
+                    default { 'Gray' }
+                }
+                
+                Write-Status "[SECRET]" "$($pattern.Name) ($( $finding.Confidence * 100 )% conf) in $RelativePath" $severityColor "White"
+            }
+        } catch {
+            $script:errorLog.Add("Regex error for pattern $($pattern.Name): $_")
+        }
+    }
+    
+    return $findings
+}
+
+function Redact-Secrets {
+    param([string]$Content, [System.Collections.Generic.List[hashtable]]$Findings)
+    
+    $redacted = $Content
+    foreach ($finding in $Findings) {
+        $pattern = [regex]::Escape($finding.RawMatch)
+        $redacted = $redacted -replace $pattern, "[REDACTED:$($finding.PatternName)]"
+    }
+    return $redacted
+}
+
+function Convert-SecurityFindingsForOutput {
+    param(
+        [array]$Findings,
+        [bool]$DoRedact
+    )
+
+    return @($Findings | ForEach-Object {
+        [ordered]@{
+            PatternName = $_.PatternName
+            Severity = $_.Severity
+            Confidence = $_.Confidence
+            FalsePositiveRate = $_.FalsePositiveRate
+            RelativePath = $_.RelativePath
+            Line = $_.Line
+            MatchPreview = if ($DoRedact) { "[REDACTED]" } else { $_.MatchPreview }
+            RawMatch = if ($DoRedact) { "[REDACTED]" } else { $_.RawMatch }
+        }
+    })
+}
+
+# ============================================================
+# DEPENDENCY GRAPH BUILDING
+# ============================================================
+
+function Resolve-ImportPath {
+    param(
+        [string]$ImportPath,
+        [string]$SourceFile,
+        [object[]]$AllFiles
+    )
+    
+    $sourceDir = Split-Path $SourceFile -Parent
+    
+    # Try direct resolution
+    $candidates = @(
+        $ImportPath,
+        "$ImportPath.js",
+        "$ImportPath.ts",
+        "$ImportPath.tsx",
+        "$ImportPath.jsx",
+        "$ImportPath/index.js",
+        "$ImportPath/index.ts",
+        "$ImportPath/index.tsx"
+    )
+    
+    foreach ($candidate in $candidates) {
+        $fullPath = if ($candidate.StartsWith('.')) {
+            [System.IO.Path]::GetFullPath((Join-Path $sourceDir $candidate))
+        } else {
+            # Node module or absolute import - skip for now
+            continue
+        }
+        
+        $matching = $AllFiles | Where-Object { 
+            $_.FullName -eq $fullPath -or 
+            $_.FullName -eq "$fullPath.ps1" -or
+            $_.FullName -eq "$fullPath.py"
+        }
+        
+        if ($matching) {
+            return $matching[0].FullName
+        }
+    }
+    
+    return $null
+}
+
+function Build-DependencyGraph {
+    param([System.Collections.Generic.List[hashtable]]$FileAnalyses)
+    
+    $graph = @{
+        Nodes = @()
+        Edges = @()
+        AdjacencyList = @{}
+        ReverseAdjacencyList = @{}
+    }
+    
+    # Add nodes
+    foreach ($analysis in $FileAnalyses) {
+        $graph.Nodes += @{
+            Id = $analysis.FilePath
+            Name = Split-Path $analysis.FilePath -Leaf
+            Extension = [System.IO.Path]::GetExtension($analysis.FilePath)
+            Size = $analysis.Size
+            Imports = $analysis.Imports
+            Exports = $analysis.Exports
+            Complexity = $analysis.Complexity
+        }
+        
+        $graph.AdjacencyList[$analysis.FilePath] = @()
+        $graph.ReverseAdjacencyList[$analysis.FilePath] = @()
+    }
+    
+    # Add edges
+    foreach ($analysis in $FileAnalyses) {
+        foreach ($import in $analysis.Imports) {
+            $target = Resolve-ImportPath -ImportPath $import -SourceFile $analysis.FilePath -AllFiles ($FileAnalyses | ForEach-Object { 
+                [PSCustomObject]@{ FullName = $_.FilePath } 
+            })
+            
+            if ($target) {
+                $edge = @{ Source = $analysis.FilePath; Target = $target; ImportSpecifier = $import }
+                $graph.Edges += $edge
+                
+                $graph.AdjacencyList[$analysis.FilePath] += $target
+                $graph.ReverseAdjacencyList[$target] += $analysis.FilePath
+            }
+        }
+    }
+    
+    return $graph
+}
+
+function Find-CircularDependencies {
+    param($DependencyGraph)
+    
+    $cycles = @()
+    $visited = @{}
+    $recStack = @{}
+    
+    function DFS {
+        param([string]$node, [System.Collections.ArrayList]$path)
+        
+        if ($recStack.ContainsKey($node)) {
+            # Found cycle
+            $cycleStart = $path.IndexOf($node)
+            if ($cycleStart -ge 0) {
+                $cycle = $path[$cycleStart..($path.Count-1)]
+                $cycles += $cycle
+            }
+            return
+        }
+        
+        if ($visited.ContainsKey($node)) { return }
+        
+        $visited[$node] = $true
+        $recStack[$node] = $true
+        $path.Add($node) | Out-Null
+        
+        if ($DependencyGraph.AdjacencyList.ContainsKey($node)) {
+            foreach ($neighbor in $DependencyGraph.AdjacencyList[$node]) {
+                DFS -node $neighbor -path $path.Clone()
+            }
+        }
+        
+        $recStack.Remove($node) | Out-Null
+    }
+    
+    foreach ($node in $DependencyGraph.Nodes.Id) {
+        if (-not $visited.ContainsKey($node)) {
+            DFS -node $node -path (@())
+        }
+    }
+    
+    return $cycles
+}
+
+function Get-CoreFiles {
+    param($DependencyGraph, [int]$TopN = 10)
+    
+    # Files with most incoming dependencies are "core"
+    $incomingCounts = @{}
+    foreach ($node in $DependencyGraph.Nodes) {
+        $id = $node.Id
+        if ($DependencyGraph.ReverseAdjacencyList.ContainsKey($id)) {
+            $incomingCounts[$id] = $DependencyGraph.ReverseAdjacencyList[$id].Count
+        } else {
+            $incomingCounts[$id] = 0
+        }
+    }
+    
+    return $incomingCounts.GetEnumerator() | 
+        Sort-Object Value -Descending | 
+        Select-Object -First $TopN
+}
+
+# ============================================================
+# RISK SCORING SYSTEM
+# ============================================================
+
+function Calculate-RiskScore {
+    param(
+        [System.Collections.Generic.List[hashtable]]$SecurityFindings,
+        [hashtable]$QualityMetrics,
+        $DependencyGraph
+    )
+    
+    $score = 100  # Start perfect, subtract for issues
+    $details = @{
+        SecurityPenalty = 0
+        QualityPenalty = 0
+        ArchitecturePenalty = 0
+    }
+    
+    # Security findings (major impact)
+    $severityWeights = @{
+        'CRITICAL' = 25
+        'HIGH' = 15
+        'MEDIUM' = 8
+        'LOW' = 3
+        'INFO' = 0
+    }
+    
+    foreach ($finding in $SecurityFindings) {
+        $penalty = $severityWeights[$finding.Severity] * $finding.Confidence
+        $score -= $penalty
+        $details.SecurityPenalty += $penalty
+    }
+    
+    # Quality penalties
+    if ($QualityMetrics.AvgComplexity -gt 20) { 
+        $penalty = 10
+        $score -= $penalty
+        $details.QualityPenalty += $penalty
+    }
+    
+    if ($QualityMetrics.AvgDuplicationRatio -gt 0.1) { 
+        $penalty = 5
+        $score -= $penalty
+        $details.QualityPenalty += $penalty
+    }
+    
+    # Architecture penalties
+    if ($DependencyGraph) {
+        $circularDeps = Find-CircularDependencies -DependencyGraph $DependencyGraph
+        $penalty = $circularDeps.Count * 5
+        $score -= $penalty
+        $details.ArchitecturePenalty += $penalty
+    }
+    
+    $finalScore = [Math]::Max(0, [Math]::Min(100, $score))
+    
+    return @{
+        OverallScore = [Math]::Round($finalScore, 1)
+        RiskLevel = Get-RiskLevel -Score $finalScore
+        Details = $details
+    }
+}
+
+function Get-RiskLevel {
+    param([float]$Score)
+    if ($score -ge 80) { return "LOW" }
+    if ($score -ge 60) { return "MEDIUM" }
+    if ($score -ge 40) { return "HIGH" }
+    return "CRITICAL"
+}
+
+# ============================================================
+# SMART CHUNKING FOR LARGE FILES
+# ============================================================
+
+function Split-LargeFileIntelligently {
+    param(
+        [string]$Content,
+        [string]$FilePath,
+        [int]$MaxChunkSize = 50000  # chars
+    )
+    
+    if ($content.Length -le $MaxChunkSize) {
+        return @(@{ 
+            Content = $Content
+            StartLine = 1
+            EndLine = ($Content -split "`n").Count
+            ChunkIndex = 0
+            TotalChunks = 1
+        })
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath)
+    $language = $languageMap[$extension]
+    $profile = $LinguisticProfiles[$language]
+    
+    # Determine boundary pattern based on language
+    $boundaryPattern = switch ($language) {
+        'javascript' { '^(?:export\s+)?(?:const|let|var|function|class|interface|type)\s+\w+' }
+        'python' { '^(?:def|class|async\s+def)\s+\w+' }
+        'typescript' { '^(?:export\s+)?(?:const|let|var|function|class|interface|type|enum)\s+\w+' }
+        default { '^(?:function|class|def|const|export)\s+\w+' }
+    }
+    
+    $chunks = @()
+    $lines = $Content -split "`n"
+    $currentChunk = @()
+    $currentSize = 0
+    $startLine = 1
+    $chunkIndex = 0
+    
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $lineSize = $line.Length + 1  # +1 for newline
+        
+        # Check if this is a natural boundary
+        $isBoundary = $line -match $boundaryPattern
+        
+        if ($currentSize + $lineSize -gt $MaxChunkSize -and $currentChunk.Count -gt 0) {
+            # Flush current chunk
+            $chunks += @{
+                Content = $currentChunk -join "`n"
+                StartLine = $startLine
+                EndLine = $i
+                ChunkIndex = $chunkIndex
+                TotalChunks = 0  # Will update later
+                IsContinuation = $chunkIndex -gt 0
+            }
+            $chunkIndex++
+            $currentChunk = @()
+            $currentSize = 0
+            $startLine = $i + 1
+            
+            # Add context from previous chunk (last 5 lines)
+            if ($i -gt 5 -and $isBoundary) {
+                $contextStart = [Math]::Max(0, $i - 5)
+                $currentChunk = $lines[$contextStart..($i-1)]
+                $currentSize = ($currentChunk | Measure-Object -Sum -Property Length).Sum
+            }
+        }
+        
+        $currentChunk += $line
+        $currentSize += $lineSize
+    }
+    
+    # Flush final chunk
+    if ($currentChunk.Count -gt 0) {
+        $chunks += @{
+            Content = $currentChunk -join "`n"
+            StartLine = $startLine
+            EndLine = $lines.Count
+            ChunkIndex = $chunkIndex
+            TotalChunks = 0
+            IsContinuation = $chunkIndex -gt 0
+        }
+    }
+    
+    # Update total chunks
+    $totalChunks = $chunks.Count
+    foreach ($chunk in $chunks) {
+        $chunk.TotalChunks = $totalChunks
+    }
+    
+    return $chunks
+}
+
+# ============================================================
+# PARALLEL PROCESSING SUPPORT
+# ============================================================
+
+function Invoke-ParallelFileAnalysis {
+    param(
+        [System.Collections.Generic.List[FileInfo]]$Files,
+        [int]$MaxThreads = 4
+    )
+    
+    if (-not $Parallel -or $PSVersionTable.PSVersion.Major -lt 7) {
+        # Fallback to sequential processing
+        return $Files | ForEach-Object { 
+            Invoke-SingleFileAnalysis -File $_ 
+        }
+    }
+    
+    Write-Status "[PARALLEL]" "Processing $($Files.Count) files with $MaxThreads threads" "Cyan" "White"
+    
+    $results = $Files | ForEach-Object -Parallel {
+        $file = $_
+        
+        # Import the analysis function (serialized)
+        function Invoke-SingleFileAnalysis {
+            param([System.IO.FileInfo]$File)
+            
+            $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+            if (-not $content) { return $null }
+            
+            $relPath = $file.FullName.Replace($using:ProjectRoot, '').TrimStart('\').TrimStart('/')
+            
+            return @{
+                FilePath = $file.FullName
+                RelativePath = $relPath
+                Content = $content
+                Size = $file.Length
+                LastModified = $file.LastWriteTimeUtc
+            }
+        }
+        
+        return Invoke-SingleFileAnalysis -File $file
+    } -ThrottleLimit $MaxThreads
+    
+    return $results
+}
+
+# ============================================================
+# FILE SORTING BY IMPORTANCE
 # ============================================================
 
 function Get-FileSortKey {
-    param([System.IO.FileInfo]$File, [string]$Root, [string]$DetectedEntryPoint)
-    $rel = $File.FullName.Substring($Root.Length).TrimStart('\','/').Replace('\','/')
-    $name = $File.Name.ToLower()
-    $ext  = $File.Extension.ToLower()
-
-    # Priority 0: Entry point
-    if ($DetectedEntryPoint -and $rel -like "*$DetectedEntryPoint*") { return "0_$rel" }
-    # Priority 1: Config / manifest files
-    if ($name -in @('package.json','pyproject.toml','requirements.txt','pom.xml','go.mod',
-        'cargo.toml','composer.json','gemfile','makefile','dockerfile',
-        '.env.example','.env.sample','.gitignore','.editorconfig')) { return "1_$rel" }
-    # Priority 2: Root-level config files (no subdirectory)
-    if (-not $rel.Contains('/') -and $ext -in @('.json','.toml','.yml','.yaml','.ini','.cfg','.conf')) { return "2_$rel" }
-    # Priority 3: Source root files
-    if (-not $rel.Contains('/')) { return "3_$rel" }
-    # Priority 4: Test files last
-    if ($rel -match '(test|spec|__tests__|\.test\.|\.spec\.)') { return "8_$rel" }
-    # Priority 5: Group by directory (depth-first, folder prefix)
-    $dir = [System.IO.Path]::GetDirectoryName($rel).Replace('\','/')
-    return "5_$dir`_$name"
+    param([hashtable]$Analysis)
+    
+    $fileName = Split-Path $Analysis.RelativePath -Leaf
+    $dirName = Split-Path $Analysis.RelativePath -Parent
+    $ext = [System.IO.Path]::GetExtension($fileName)
+    
+    $priority = "5_"  # Default
+    
+    # Entry points get highest priority
+    if ($fileName -match '^(index|main|app|layout|page|routes?|server|program|startup)\.') {
+        $priority = "0_"
+    }
+    # Config files
+    elseif ($fileName -match '\.(config|conf|rc|yaml|yml|json|toml)$' -or 
+            $fileName -match '^(package\.json|requirements\.txt|Cargo\.toml|go\.mod|pom\.xml|build\.gradle)') {
+        $priority = "1_"
+    }
+    # Root-level configs
+    elseif ($dirName -eq '.' -or $dirName -eq '') {
+        $priority = "2_"
+    }
+    # Source root files
+    elseif ($dirName -match '^src$' -or $dirName -match '^lib$') {
+        $priority = "3_"
+    }
+    # Test files (lowest priority)
+    elseif ($fileName -match '\.(test|spec)\.' -or $dirName -match 'test|spec|__tests__') {
+        $priority = "8_"
+    }
+    
+    # Within same priority, sort by directory then name
+    return "$priority$dirName`:$fileName"
 }
 
 # ============================================================
-#  FILE TRAVERSAL (symlink guard + gitignore + error collection)
+# TOKEN ESTIMATION (LANGUAGE-AWARE)
 # ============================================================
 
-function Get-ProjectFilesFast {
+function Get-TokenEstimate {
+    param([string]$Content, [string]$Extension)
+    
+    $charCount = $Content.Length
+    
+    # Language-specific ratios (chars per token)
+    $ratio = switch ($Extension) {
+        '.json' { 3.0 }
+        '.xml' { 3.0 }
+        '.yaml' { 5.0 }
+        '.yml' { 5.0 }
+        '.toml' { 5.0 }
+        '.md' { 4.5 }
+        '.html' { 4.0 }
+        '.css' { 4.0 }
+        '.sql' { 4.0 }
+        default { 4.0 }
+    }
+    
+    # Adjust for Arabic/CJK content (higher token density)
+    if ($Content -match '[\u0600-\u06FF]') { $ratio *= 0.7 }  # Arabic
+    if ($Content -match '[\u4E00-\u9FFF]') { $ratio *= 0.6 }  # CJK
+    
+    return [Math]::Ceiling($charCount / $ratio)
+}
+
+# ============================================================
+# MAIN ANALYSIS PIPELINE
+# ============================================================
+
+function Invoke-SingleFileAnalysis {
+    param([System.IO.FileInfo]$File)
+    
+    $relPath = $File.FullName.Replace($ProjectRoot, '').TrimStart('\').TrimStart('/')
+    
+    # Check cache first
+    if ($EnableCache) {
+        $cached = Get-CachedAnalysis -FilePath $File.FullName -LastModified $File.LastWriteTimeUtc
+        if ($cached) {
+            return $cached
+        }
+    }
+    
+    # Read content
+    $content = Get-FileContent -Path $File.FullName
+    if (-not $content) { return $null }
+    
+    $extension = [System.IO.Path]::GetExtension($File.FullName)
+    
+    # Extract dependencies
+    $imports = Extract-Dependencies -Content $content -Extension $extension
+    
+    # Extract exports
+    $exports = Extract-Exports -Content $content -Extension $extension
+    
+    # Calculate complexity
+    $complexity = Get-CyclomaticComplexity -Content $content -Extension $extension
+    
+    # Get code metrics
+    $metrics = Get-CodeMetrics -Content $content -FilePath $File.FullName
+    
+    # Scan for secrets
+    $securityFindings = Invoke-SecretScan -Content $content -FilePath $File.FullName -RelativePath $relPath
+    
+    # Apply redaction if requested
+    $finalContent = if ($Redact -and $securityFindings.Count -gt 0) {
+        Redact-Secrets -Content $content -Findings $securityFindings
+    } else {
+        $content
+    }
+    
+    # Estimate tokens
+    $tokens = Get-TokenEstimate -Content $finalContent -Extension $extension
+    
+    $analysis = @{
+        FilePath = $File.FullName
+        RelativePath = $relPath
+        Content = $finalContent
+        Size = $File.Length
+        Extension = $extension
+        Language = $languageMap[$extension]
+        LastModified = $File.LastWriteTimeUtc
+        Imports = $imports
+        Exports = $exports
+        Complexity = $complexity
+        Metrics = $metrics
+        SecurityFindings = $securityFindings
+        Tokens = $tokens
+        SortKey = Get-FileSortKey -Analysis @{ RelativePath = $relPath }
+    }
+    
+    # Update cache
+    if ($EnableCache) {
+        Update-Cache -FilePath $File.FullName -LastModified $File.LastWriteTimeUtc -Analysis $analysis
+    }
+    
+    return $analysis
+}
+
+# ============================================================
+# OUTPUT GENERATION
+# ============================================================
+
+function Write-MarkdownHeader {
     param(
-        [string] $CurrentPath,
-        [string] $Root,
-        [ref]    $Files,
-        [ref]    $SkipLarge,
-        [string[]] $ExcludeAbsolutePaths,
-        $GitIgnorePatterns
+        [string]$ProjectName,
+        [string]$Framework,
+        [int]$TotalFiles,
+        [int]$TotalTokens,
+        [hashtable]$RiskAssessment,
+        [DateTime]$GeneratedAt
     )
-
-    # Symlink / loop guard
-    try {
-        $realPath = (Resolve-Path -LiteralPath $CurrentPath -ErrorAction Stop).Path
-    } catch {
-        $script:errorLog.Add("Cannot resolve path: $CurrentPath")
-        return
-    }
-    if (-not $script:visitedPaths.Add($realPath)) { return }   # already visited
-
-    try {
-        $items = Get-ChildItem -LiteralPath $CurrentPath -ErrorAction SilentlyContinue
-    } catch {
-        $script:errorLog.Add("Cannot list: $CurrentPath — $($_.Exception.Message)")
-        return
-    }
-
-    foreach ($item in $items) {
-        # Gitignore check
-        if ($GitIgnorePatterns -and (Test-GitIgnored -Item $item -Root $Root -Patterns $GitIgnorePatterns)) { continue }
-
-        if ($item.PSIsContainer) {
-            if ($excludeFolders -contains $item.Name) { continue }
-            if ($item.Name.StartsWith('.') -and $item.Name -ne '.github') { continue }
-            Get-ProjectFilesFast -CurrentPath $item.FullName -Root $Root -Files $Files `
-                -SkipLarge $SkipLarge -ExcludeAbsolutePaths $ExcludeAbsolutePaths `
-                -GitIgnorePatterns $GitIgnorePatterns
-        } else {
-            # Skip output file itself
-            if ($ExcludeAbsolutePaths -contains $item.FullName) { continue }
-
-            # Skip excluded file patterns
-            $skip = $false
-            foreach ($pat in $excludeFilePatterns) { if ($item.Name -like $pat) { $skip=$true; break } }
-            if ($skip) { continue }
-
-            $nameLower = $item.Name.ToLower()
-            $isMatch   = $false
-
-            # .env safety gate
-            if ($nameLower -like '.env*') {
-                if ($safeEnvFiles -contains $nameLower) { $isMatch = $true } else { continue }
-            }
-
-            if (-not $isMatch) {
-                $extLower = $item.Extension.ToLower()
-                if ($includeExtensions -contains $extLower) { $isMatch = $true }
-                elseif ($extLower -eq '' -and $specialFileNames -contains $item.Name) { $isMatch = $true }
-            }
-
-            if ($isMatch) {
-                $rel = $item.FullName.Substring($Root.Length).TrimStart('\','/')
-                if ($item.Length -gt $maxFileBytes) {
-                    $SkipLarge.Value.Add("$rel ($([math]::Round($item.Length/1MB,2)) MB)")
-                } else {
-                    $Files.Value.Add($item)
-                }
-            }
+    
+    $riskLevel = $RiskAssessment.RiskLevel
+    $riskScore = $RiskAssessment.OverallScore
+    
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# PROJECT INTELLIGENCE BUNDLE")
+    $lines.Add("")
+    $lines.Add("## Executive Summary")
+    $lines.Add("")
+    $lines.Add("| Metric | Value |")
+    $lines.Add("|--------|-------|")
+    $lines.Add("| **Project** | $ProjectName |")
+    $lines.Add("| **Framework** | $Framework |")
+    $lines.Add("| **Generated** | $($GeneratedAt.ToString("yyyy-MM-dd HH:mm:ss")) |")
+    $lines.Add("| **Total Files** | $TotalFiles |")
+    $lines.Add("| **Estimated Tokens** | $TotalTokens K |")
+    $lines.Add("| **Risk Level** | $riskLevel ($riskScore/100) |")
+    $lines.Add("")
+    $lines.Add("## Risk Assessment")
+    $lines.Add("")
+    $lines.Add("**Overall Score**: $riskScore/100 ($(Get-RiskDescription $riskScore))")
+    $lines.Add("")
+    
+    if ($script:secretsFound.Count -gt 0) {
+        $lines.Add("### Security Findings: $($script:secretsFound.Count)")
+        $lines.Add("")
+        $lines.Add("| Severity | Count | Files |")
+        $lines.Add("|----------|-------|-------|")
+        foreach ($group in (Group-SecretsBySeverity)) {
+            $lines.Add("| $($group.Severity) | $($group.Count) | $($group.Files -join ', ') |")
         }
-    }
-}
-
-# ============================================================
-#  SMART SEARCH
-# ============================================================
-
-function Get-PriorityPaths {
-    param([string[]]$Drives)
-    $paths = [System.Collections.Generic.List[string]]::new()
-    foreach ($drv in $Drives) {
-        $usersDir = [System.IO.Path]::Combine($drv, "Users")
-        if (Test-Path $usersDir -ErrorAction SilentlyContinue) {
-            Get-ChildItem -Path $usersDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $u = $_.FullName
-                foreach ($sub in @("Desktop","Documents","Downloads","Projects","repos","dev","source","workspace","code","src","github","OneDrive")) {
-                    $p = [System.IO.Path]::Combine($u, $sub)
-                    if (Test-Path $p -ErrorAction SilentlyContinue) { $paths.Add($p) }
-                }
-                $paths.Add($u)
-            }
-        }
-        foreach ($sub in @("Projects","repos","dev","source","workspace","code","src","github","work")) {
-            $p = [System.IO.Path]::Combine($drv, $sub)
-            if (Test-Path $p -ErrorAction SilentlyContinue) { $paths.Add($p) }
-        }
-    }
-    return ($paths | Select-Object -Unique)
-}
-
-function Search-ProjectByName {
-    param([string]$Name, [string[]]$Drives)
-    $exact   = [System.Collections.Generic.List[string]]::new()
-    $partial = [System.Collections.Generic.List[string]]::new()
-    $low = $Name.ToLower()
-
-    Write-Status "SEARCH" "Phase 1: Scanning priority locations..." "Red" "Gray"
-    $pri = Get-PriorityPaths -Drives $Drives
-    $priCount = 0
-    foreach ($base in $pri) {
-        $priCount++
-        if (-not $Quiet) {
-            Write-Progress -Activity "Searching for project '$Name'" -Status "Scanning $base" -PercentComplete ([math]::Min(90, ($priCount/$pri.Count)*90))
-        }
-        try {
-            Get-ChildItem -Path $base -Directory -Depth 4 -ErrorAction SilentlyContinue | ForEach-Object {
-                $fn = $_.Name.ToLower()
-                if ($fn -eq $low -and $exact -notcontains $_.FullName) { $exact.Add($_.FullName) }
-                elseif ($fn -like "*$low*" -and $partial -notcontains $_.FullName) { $partial.Add($_.FullName) }
-            }
-        } catch {}
-    }
-    if (-not $Quiet) { Write-Progress -Activity "Searching for project '$Name'" -Completed }
-
-    if ($exact.Count -gt 0) { return @{ Exact=$exact; Partial=$partial } }
-
-    Write-Status "SEARCH" "Phase 2: Expanding to full drive scan..." "DarkRed" "Gray"
-    foreach ($drv in $Drives) {
-        try {
-            Get-ChildItem -Path $drv -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                if ($systemSkipFolders -contains $_.Name -or $_.Name.StartsWith('$')) { return }
-                try {
-                    Get-ChildItem -Path $_.FullName -Directory -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object {
-                        $fn = $_.Name.ToLower()
-                        if ($fn -eq $low -and $exact -notcontains $_.FullName)   { $exact.Add($_.FullName) }
-                        elseif ($fn -like "*$low*" -and $partial -notcontains $_.FullName) { $partial.Add($_.FullName) }
-                    }
-                } catch {}
-            }
-        } catch {}
-    }
-    return @{ Exact=$exact; Partial=$partial }
-}
-
-function Select-FromMatches {
-    param($Exact, $Partial)
-    $all = @(); if ($Exact.Count -gt 0) { $all += $Exact }; if ($Partial.Count -gt 0) { $all += $Partial }
-    if ($all.Count -eq 0) { return $null }
-    if ($all.Count -eq 1) {
-        Write-Status "FOUND" $all[0] "Green" "White"
-        $c = Read-Host "  Use this path? [Y/n]"
-        if ($c -match '^n') { return $null }
-        return $all[0]
-    }
-    Write-Host ""; Write-Status "FOUND" "$($all.Count) matches:" "Green" "White"; Write-Host ""
-    $lim = [Math]::Min($all.Count, 15)
-    for ($i=0; $i -lt $lim; $i++) {
-        $tag = if ($Exact -and $Exact -contains $all[$i]) { " [EXACT]" } else { "" }
-        Write-Host "    [$($i+1)] $($all[$i])$tag" -ForegroundColor White
-    }
-    if ($all.Count -gt 15) { Write-Host "    ... and $($all.Count-15) more" -ForegroundColor DarkGray }
-    Write-Host ""
-    $choice = Read-Host "  Select number (or 0 to cancel)"
-    $idx=0
-    if ([int]::TryParse($choice,[ref]$idx) -and $idx -ge 1 -and $idx -le $lim) { return $all[$idx-1] }
-    return $null
-}
-
-function Search-OutputFolder {
-    param([string]$Name, [string[]]$Drives)
-    if (Test-Path $Name -ErrorAction SilentlyContinue) { return $Name }
-    $found = [System.Collections.Generic.List[string]]::new()
-    $low   = $Name.ToLower()
-    foreach ($base in (Get-PriorityPaths -Drives $Drives)) {
-        try {
-            $d = [System.IO.Path]::Combine($base, $Name)
-            if (Test-Path $d -ErrorAction SilentlyContinue) { $found.Add($d) }
-            Get-ChildItem -Path $base -Directory -Depth 2 -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name.ToLower() -eq $low -and $found -notcontains $_.FullName } |
-                ForEach-Object { $found.Add($_.FullName) }
-        } catch {}
-    }
-    if ($found.Count -eq 1) { return $found[0] }
-    if ($found.Count -gt 1) {
-        Write-Host ""; Write-Status "FOUND" "$($found.Count) matching folders:" "Green" "White"
-        $lim = [Math]::Min($found.Count,10)
-        for ($i=0;$i -lt $lim;$i++) { Write-Host "    [$($i+1)] $($found[$i])" -ForegroundColor White }
-        $c=Read-Host "  Select number"; $idx=0
-        if ([int]::TryParse($c,[ref]$idx) -and $idx -ge 1 -and $idx -le $lim) { return $found[$idx-1] }
-    }
-    return $null
-}
-
-# ============================================================
-#  CONFIG SYSTEM
-# ============================================================
-
-function Import-BundleConfig {
-    param([string]$Root)
-    $cfgPath = [System.IO.Path]::Combine($Root, "bundle.config.json")
-    if (-not (Test-Path $cfgPath -ErrorAction SilentlyContinue)) { return }
-    try {
-        $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Write-Status "CONFIG" "Loaded bundle.config.json" "Cyan" "Cyan"
-        if ($cfg.OutputDir   -and $script:OutputDir   -eq "") { $script:OutputDir   = $cfg.OutputDir }
-        if ($cfg.Format      -and $script:Format      -eq "txt") { $script:Format   = $cfg.Format }
-        if ($cfg.MaxFileSizeMB)   { $script:MaxFileSizeMB = $cfg.MaxFileSizeMB }
-        if ($cfg.StripPaths)      { $script:StripPaths    = [bool]$cfg.StripPaths }
-        if ($cfg.Redact)          { $script:Redact        = [bool]$cfg.Redact }
-        if ($cfg.IncludeTree)     { $script:IncludeTree   = [bool]$cfg.IncludeTree }
-        if ($cfg.SplitKTokens)    { $script:SplitKTokens  = [int]$cfg.SplitKTokens }
-        if ($cfg.ExtraExtensions) { $script:ExtraExtensions = $cfg.ExtraExtensions }
-        if ($cfg.ExtraExcludes)   { $script:ExtraExcludes   = $cfg.ExtraExcludes }
-    } catch { Write-Status "WARN" "Could not parse bundle.config.json" "Yellow" "Yellow" }
-}
-
-function Export-BundleConfig {
-    param([string]$Root)
-    $cfgPath = [System.IO.Path]::Combine($Root, "bundle.config.json")
-    $cfg = @{
-        OutputDir       = $OutputDir
-        Format          = $Format
-        MaxFileSizeMB   = $MaxFileSizeMB
-        StripPaths      = $StripPaths.IsPresent
-        Redact          = $Redact.IsPresent
-        IncludeTree     = $IncludeTree.IsPresent
-        SplitKTokens    = $SplitKTokens
-        ExtraExtensions = $ExtraExtensions
-        ExtraExcludes   = $ExtraExcludes
-        SavedAt         = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    }
-    $cfg | ConvertTo-Json -Depth 3 | Set-Content -Path $cfgPath -Encoding UTF8
-    Write-Status "CONFIG" "Saved to bundle.config.json" "Cyan" "Cyan"
-}
-
-# ============================================================
-#  DIRECTORY TREE
-# ============================================================
-
-function Get-FilteredTree {
-    param([string]$Path, [string]$Root, [int]$Indent=0)
-    $sb = [System.Text.StringBuilder]::new()
-    try {
-        $items = Get-ChildItem -LiteralPath $Path -ErrorAction SilentlyContinue | Sort-Object { $_.PSIsContainer },Name
-        foreach ($item in $items) {
-            $prefix = ("  " * $Indent) + "|-- "
-            if ($item.PSIsContainer) {
-                if ($excludeFolders -contains $item.Name) { continue }
-                [void]$sb.AppendLine("$prefix$($item.Name)/")
-                [void]$sb.Append((Get-FilteredTree -Path $item.FullName -Root $Root -Indent ($Indent+1)))
-            } else { [void]$sb.AppendLine("$prefix$($item.Name)") }
-        }
-    } catch {}
-    return $sb.ToString()
-}
-
-# ============================================================
-#  LLM CONTEXT HEADER
-# ============================================================
-
-function Write-LlmContextHeader {
-    param($Writer, [string]$ProjectName, $ProjectInfo, $GitMeta, $LangStats, [long]$TotalTokens, [string]$Format, [int]$FileCount)
-    $line = "=" * 80
-    $Writer.WriteLine($line)
-    Writer.WriteLine("  PROJECT INTELLIGENCE SUMMARY")
-    $Writer.WriteLine($line)
-    $Writer.WriteLine("  PROJECT       : $ProjectName")
-    $Writer.WriteLine("  TYPE          : $($ProjectInfo.Framework)")
-    if ($ProjectInfo.EntryPoint) {
-        $Writer.WriteLine("  ENTRY POINT   : $($ProjectInfo.EntryPoint)")
-    }
-    if ($GitMeta.Available) {
-        $Writer.WriteLine("  GIT BRANCH    : $($GitMeta.Branch)")
-        $Writer.WriteLine("  LAST COMMIT   : $($GitMeta.LastCommit)")
-        $Writer.WriteLine("  AUTHOR        : $($GitMeta.Author)")
-        if ($GitMeta.Remote) { $Writer.WriteLine("  REMOTE        : $($GitMeta.Remote)") }
-        if ($GitMeta.ChangedFiles.Count -gt 0) {
-            $Writer.WriteLine("  MODIFIED      : $($GitMeta.ChangedFiles.Count) file(s) since last commit")
-        }
-        if ($GitMeta.TotalCommits) { $Writer.WriteLine("  TOTAL COMMITS : $($GitMeta.TotalCommits)") }
-    } elseif ($ProjectInfo.IsGitRepo) {
-        $Writer.WriteLine("  GIT           : Repository found (git not in PATH)")
-    }
-    $Writer.WriteLine("")
-
-    # Language breakdown
-    if ($LangStats.Count -gt 0) {
-        $topLangs = $LangStats | Select-Object -First 6
-        $langStr = ($topLangs | ForEach-Object { "$($_.Language) $($_.Pct)%" }) -join " | "
-        $Writer.WriteLine("  LANGUAGES     : $langStr")
-    }
-    $Writer.WriteLine("  FILES         : $FileCount source files")
-    $Writer.WriteLine("  EST. TOKENS   : $(Format-Tokens $TotalTokens)")
-    $Writer.WriteLine("  FORMAT        : $($Format.ToUpper()) ($(if($Format -eq 'md'){'language-tagged fences'}elseif($Format -eq 'json'){'structured JSON'}else{'plain text'}))")
-    $Writer.WriteLine("")
-
-    # Context window fit check
-    $Writer.Write("  CONTEXT FIT   : ")
-    $fits = @(); $warns = @()
-    foreach ($llm in $llmLimits.GetEnumerator()) {
-        $limitK = $llm.Value * 1000
-        if ($TotalTokens -le $limitK) { $fits  += "$($llm.Key) ([OK])" }
-        else                          { $warns += "$($llm.Key) ([OVER])" }
-    }
-    $all = @(); if ($fits.Count -gt 0) { $all += $fits }; if ($warns.Count -gt 0) { $all += $warns }
-    $Writer.WriteLine($all -join " | ")
-
-    $Writer.WriteLine("")
-    $Writer.WriteLine("  " + ("─" * 76))
-    $Writer.WriteLine("  SUGGESTED PROMPT (paste before sharing this bundle):")
-    $Writer.WriteLine("")
-    $ep = if ($ProjectInfo.EntryPoint) { "The entry point is $($ProjectInfo.EntryPoint). " } else { "" }
-    $Writer.WriteLine("  `"I'm sharing my complete $ProjectName codebase. It's a $($ProjectInfo.Framework)")
-    $Writer.WriteLine("   project with $FileCount files (~$(Format-Tokens $TotalTokens)). $($ep)Please [YOUR QUESTION].`"")
-    $Writer.WriteLine("")
-    $Writer.WriteLine($line)
-    $Writer.WriteLine("")
-}
-
-# Wrapper to call the function (workaround for the Write-LlmContextHeader Writer. typo I need to fix)
-function Invoke-WriteLlmHeader {
-    param($W, $ProjectName, $ProjectInfo, $GitMeta, $LangStats, $TotalTokens, $FmtStr, $FileCount)
-    $line = "=" * 80
-    $W.WriteLine($line)
-    $W.WriteLine("  PROJECT INTELLIGENCE SUMMARY")
-    $W.WriteLine($line)
-    $W.WriteLine("  PROJECT       : $ProjectName")
-    $W.WriteLine("  TYPE          : $($ProjectInfo.Framework)")
-    if ($ProjectInfo.EntryPoint) { $W.WriteLine("  ENTRY POINT   : $($ProjectInfo.EntryPoint)") }
-    if ($GitMeta.Available) {
-        $W.WriteLine("  GIT BRANCH    : $($GitMeta.Branch)")
-        $W.WriteLine("  LAST COMMIT   : $($GitMeta.LastCommit)")
-        $W.WriteLine("  AUTHOR        : $($GitMeta.Author)")
-        if ($GitMeta.Remote)                   { $W.WriteLine("  REMOTE        : $($GitMeta.Remote)") }
-        if ($GitMeta.ChangedFiles.Count -gt 0) { $W.WriteLine("  MODIFIED      : $($GitMeta.ChangedFiles.Count) file(s) uncommitted") }
-        if ($GitMeta.TotalCommits)             { $W.WriteLine("  TOTAL COMMITS : $($GitMeta.TotalCommits)") }
-    } elseif ($ProjectInfo.IsGitRepo) {
-        $W.WriteLine("  GIT           : Repo found (git binary not in PATH)")
-    }
-    $W.WriteLine("")
-    if ($LangStats -and $LangStats.Count -gt 0) {
-        $top = $LangStats | Select-Object -First 6
-        $ls  = ($top | ForEach-Object { "$($_.Language) $($_.Pct)%" }) -join " | "
-        $W.WriteLine("  LANGUAGES     : $ls")
-    }
-    $W.WriteLine("  FILES         : $FileCount source files")
-    $W.WriteLine("  EST. TOKENS   : $(Format-Tokens $TotalTokens)")
-    $W.WriteLine("  FORMAT        : $($FmtStr.ToUpper())")
-    $W.WriteLine("")
-
-    $W.Write("  CONTEXT FIT   : ")
-    $parts = @()
-    foreach ($llm in $llmLimits.GetEnumerator()) {
-        $limitTok = $llm.Value * 1000
-        $sym = if ($TotalTokens -le $limitTok) { "[OK]" } else { "[OVER-LIMIT]" }
-        $parts += "$($llm.Key): $sym"
-    }
-    $W.WriteLine($parts -join "  |  ")
-    $W.WriteLine("")
-    $W.WriteLine("  " + ("─" * 76))
-    $W.WriteLine("  SUGGESTED PROMPT TO PASTE BEFORE THIS BUNDLE:")
-    $W.WriteLine("")
-    $ep = if ($ProjectInfo.EntryPoint) { "Entry point: $($ProjectInfo.EntryPoint). " } else { "" }
-    $W.WriteLine("  `"I'm sharing my complete [$ProjectName] codebase. Framework: $($ProjectInfo.Framework).")
-    $W.WriteLine("   It has $FileCount files (~$(Format-Tokens $TotalTokens)). $($ep)Please help me: [YOUR QUESTION].`"")
-    $W.WriteLine("")
-    $W.WriteLine($line)
-    $W.WriteLine("")
-}
-
-# ============================================================
-#  BUNDLE WRITER
-# ============================================================
-
-function Write-FileEntry {
-    param($Writer, [System.IO.FileInfo]$File, [string]$Root, [string]$RelPath,
-          [string]$Format, [bool]$DoStripPaths, [bool]$DoRedact)
-
-    $content = Read-FileContent -Path $File.FullName
-    if ($null -eq $content) {
-        $Writer.WriteLine("[ERROR: Could not read file]")
-        return 0L
-    }
-
-    # Secret scan (always) and optionally redact
-    $findings = Invoke-SecretScan -Content $content -RelPath $RelPath
-    if ($findings.Count -gt 0 -and $DoRedact) {
-        $content = Invoke-SecretRedact -Content $content
-    }
-
-    # Token estimate for this file
-    $fileTokens = Get-TokenEstimate -Chars $content.Length -Extension $File.Extension -Content $content
-
-    # Display path (strip absolute path if requested)
-    $displayPath = if ($DoStripPaths) { "[PROJECT_ROOT]/$RelPath".Replace('\','/') } else { $RelPath }
-
-    $secretWarn = if ($findings.Count -gt 0 -and -not $DoRedact) {
-        "`n[!] POTENTIAL SECRET(S) DETECTED: $(($findings | ForEach-Object { $_.Name }) -join ', ') — REVIEW BEFORE SHARING`n"
-    } else { "" }
-
-    switch ($Format) {
-        'md' {
-            $lang = $languageMap[$File.Extension.ToLower()]
-            if (-not $lang) {
-                $lang = switch ($File.Name) {
-                    'Dockerfile' { 'dockerfile' }
-                    'Makefile'   { 'makefile'   }
-                    default      { 'plaintext'  }
-                }
-            }
-            $Writer.WriteLine("")
-            $Writer.WriteLine("## $displayPath")
-            $Writer.WriteLine("")
-            if ($secretWarn) { $Writer.WriteLine("<!-- $($secretWarn.Trim()) -->"); $Writer.WriteLine("") }
-            $Writer.WriteLine("``````$lang")
-            $Writer.WriteLine($content)
-            $Writer.WriteLine("``````")
-        }
-        'json' {
-            # JSON format is assembled externally; this path is not used in JSON mode
-        }
-        default {   # txt
-            $Writer.WriteLine("")
-            $Writer.WriteLine("=" * 80)
-            $Writer.WriteLine("FILE: $displayPath")
-            $Writer.WriteLine("=" * 80)
-            if ($secretWarn) { $Writer.WriteLine($secretWarn) }
-            $Writer.WriteLine($content)
-        }
-    }
-
-    return $fileTokens
-}
-
-# ============================================================
-#  MAIN FLOW
-# ============================================================
-
-Write-Banner
-
-# Ctrl+C / crash guard — ensure writer is always closed
-trap {
-    Write-Host "`n`n  [INTERRUPTED] Cleaning up..." -ForegroundColor Yellow
-    if ($script:writer) {
-        try { $script:writer.Close(); $script:writer.Dispose() } catch {}
-    }
-    if ($script:resolvedOutput -and (Test-Path $script:resolvedOutput -ErrorAction SilentlyContinue)) {
-        Remove-Item $script:resolvedOutput -Force -ErrorAction SilentlyContinue
-        Write-Host "  Partial output removed." -ForegroundColor DarkYellow
-    }
-    break
-}
-
-# ── STEP 0: Detect drives ──────────────────────────────────
-Write-SectionHeader "SYSTEM"
-$drives = Get-AvailableDrives
-Write-Status "DRIVES" ($drives -join "  |  ") "Red" "White"
-Write-Sep
-
-# ── STEP 1: Resolve project root ──────────────────────────
-Write-SectionHeader "PROJECT"
-if ($ProjectRoot -eq "") {
-    Write-Host "  [STEP 1] Which project do you want to bundle?" -ForegroundColor White
-    Write-Host "  (Folder name, full path, or Enter for current directory)" -ForegroundColor DarkGray
-    $userInput = Read-Host "  >"
-    if ($userInput -eq "") {
-        $ProjectRoot = (Get-Location).Path
-        Write-Status "INFO" "Using current directory" "Yellow" "Gray"
-    } elseif (Test-Path $userInput -ErrorAction SilentlyContinue) {
-        $ProjectRoot = (Resolve-Path $userInput).Path
-        Write-Status "PATH" "Valid path provided" "Green" "Gray"
     } else {
-        $res = Search-ProjectByName -Name $userInput -Drives $drives
-        $sel = Select-FromMatches -Exact $res.Exact -Partial $res.Partial
-        if ($sel) { $ProjectRoot = $sel }
-        else { Write-Status "ERROR" "No project found. Exiting." "Red" "Red"; exit 1 }
+        $lines.Add("No security issues detected.")
     }
-} elseif (-not (Test-Path $ProjectRoot -ErrorAction SilentlyContinue)) {
-    Write-Status "SEARCH" "Path not found, searching by name..." "Yellow" "Gray"
-    $leaf = Split-Path $ProjectRoot -Leaf
-    $res  = Search-ProjectByName -Name $leaf -Drives $drives
-    $sel  = Select-FromMatches -Exact $res.Exact -Partial $res.Partial
-    if ($sel) { $ProjectRoot = $sel }
-    else { Write-Status "ERROR" "Project not found. Exiting." "Red" "Red"; exit 1 }
+    
+    $lines.Add("")
+    $lines.Add("## Suggested Analysis Path")
+    $lines.Add("")
+    $lines.Add("1. ``$(Find-EntryPoint)`` - Application entry point")
+    $lines.Add("2. ``package.json`` (or equivalent) - Dependencies")
+    $lines.Add("3. Core modules (see Dependency Graph below)")
+    $lines.Add("")
+    $lines.Add("---")
+    $lines.Add("")
+    
+    return ($lines -join "`n")
 }
 
-$ProjectRoot        = (Resolve-Path $ProjectRoot).Path.TrimEnd('\','/')
-$projectFolderName  = Split-Path $ProjectRoot -Leaf
-
-# Load config if requested
-if ($LoadConfig) { Import-BundleConfig -Root $ProjectRoot }
-
-Write-Status "PROJECT" $projectFolderName "White" "White"
-Write-Status "ROOT"    $ProjectRoot       "White" "Gray"
-
-# ── STEP 2: Project intelligence ──────────────────────────
-Write-SectionHeader "INTELLIGENCE"
-$projectInfo = Get-ProjectType -Root $ProjectRoot
-$gitMeta     = Get-GitMetadata -Root $ProjectRoot
-$giPatterns  = Get-GitIgnorePatterns -Root $ProjectRoot
-
-Write-Status "TYPE"       "$($projectInfo.Framework)" "Cyan" "Cyan"
-if ($projectInfo.EntryPoint) {
-    Write-Status "ENTRY"  "$($projectInfo.EntryPoint)" "Cyan" "Gray"
-}
-if ($gitMeta.Available) {
-    Write-Status "BRANCH" "$($gitMeta.Branch)" "Green" "White"
-    Write-Status "COMMIT" "$($gitMeta.LastCommit)" "Green" "Gray"
-    if ($gitMeta.ChangedFiles.Count -gt 0) {
-        Write-Status "PENDING" "$($gitMeta.ChangedFiles.Count) uncommitted change(s)" "Yellow" "Yellow"
+function Get-RiskColor {
+    param([string]$Level)
+    switch ($Level) {
+        'CRITICAL' { return '#dc3545' }
+        'HIGH' { return '#fd7e14' }
+        'MEDIUM' { return '#ffc107' }
+        'LOW' { return '#28a745' }
+        default { return '#6c757d' }
     }
 }
-if ($giPatterns.Count -gt 0) {
-    Write-Status "GITIGNORE" "$($giPatterns.Count) ignore pattern(s) loaded" "DarkGray" "Gray"
-}
-Write-Sep
 
-# ── STEP 3: Resolve output directory ──────────────────────
-Write-SectionHeader "OUTPUT"
-if ($OutputDir -eq "") {
-    Write-Host "  [STEP 2] Where do you want to save the output?" -ForegroundColor White
-    Write-Host "  (Folder name, full path, or Enter for current directory)" -ForegroundColor DarkGray
-    $outInput = Read-Host "  >"
-    if ($outInput -eq "") {
-        $OutputDir = (Get-Location).Path
-    } elseif (Test-Path $outInput -ErrorAction SilentlyContinue) {
-        $OutputDir = (Resolve-Path $outInput).Path
+function Get-RiskDescription {
+    param([float]$Score)
+    if ($score -ge 80) { return "Low risk - Code appears secure and well-structured" }
+    if ($score -ge 60) { return "Moderate risk - Some issues need attention" }
+    if ($score -ge 40) { return "High risk - Multiple critical issues found" }
+    return "Critical risk - Immediate remediation required"
+}
+
+function Detect-Framework {
+    param([string]$ProjectRoot)
+    
+    foreach ($kv in $projectSignatures.GetEnumerator()) {
+        foreach ($sig in $kv.Value) {
+            if (Test-Path (Join-Path $ProjectRoot $sig)) {
+                return $kv.Key
+            }
+        }
+    }
+    
+    return "Unknown"
+}
+
+function Group-SecretsBySeverity {
+    $groups = @{}
+    foreach ($secret in $script:secretsFound) {
+        $sev = $secret.Severity
+        if (-not $groups.ContainsKey($sev)) {
+            $groups[$sev] = @{ Severity = $sev; Count = 0; Files = @() }
+        }
+        $groups[$sev].Count++
+        $file = Split-Path $secret.RelativePath -Leaf
+        if (-not $groups[$sev].Files.Contains($file)) {
+            $groups[$sev].Files += $file
+        }
+    }
+    return $groups.Values | Sort-Object @{ Expression = { 
+        switch ($_.Severity) {
+            'CRITICAL' { 1 }
+            'HIGH' { 2 }
+            'MEDIUM' { 3 }
+            'LOW' { 4 }
+            default { 5 }
+        }
+    }}
+}
+
+function Find-EntryPoint {
+    foreach ($ep in $entryPoints.Values) {
+        foreach ($path in $ep) {
+            if (Test-Path (Join-Path $ProjectRoot $path)) {
+                return $path
+            }
+        }
+    }
+    return "src/index.* or main.*"
+}
+
+function Write-DependencyGraphMarkdown {
+    param($DependencyGraph)
+    
+    $coreFiles = Get-CoreFiles -DependencyGraph $DependencyGraph -TopN 10
+    $cycles = Find-CircularDependencies -DependencyGraph $DependencyGraph
+    
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("")
+    $lines.Add("## Dependency Graph")
+    $lines.Add("")
+    $lines.Add("### Core Files (Most Imported)")
+    $lines.Add("")
+    $lines.Add("| File | Incoming Dependencies |")
+    $lines.Add("|------|----------------------|")
+    foreach ($cf in $coreFiles) {
+        $lines.Add("| ``$($cf.Key)`` | $($cf.Value) |")
+    }
+    $lines.Add("")
+    
+    if ($cycles.Count -gt 0) {
+        $lines.Add("### Circular Dependencies Detected")
+        $lines.Add("")
+        foreach ($cycle in $cycles) {
+            $lines.Add("- ``$($cycle -join ' -> ')``")
+        }
     } else {
-        $found = Search-OutputFolder -Name $outInput -Drives $drives
-        if ($found) {
-            $OutputDir = $found
-            Write-Status "FOUND" $OutputDir "Green" "White"
-        } else {
-            Write-Host "  Folder '$outInput' not found." -ForegroundColor Yellow
-            $create = Read-Host "  Create it in current directory? [Y/n]"
-            if ($create -match '^n') {
-                $OutputDir = (Get-Location).Path
-                Write-Status "INFO" "Using current directory" "Yellow" "Gray"
-            } else {
-                $OutputDir = [System.IO.Path]::Combine((Get-Location).Path, $outInput)
-                New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-                Write-Status "CREATED" $OutputDir "Green" "White"
+        $lines.Add("No circular dependencies detected.")
+    }
+    
+    $lines.Add("")
+    $lines.Add("### Dependency Visualization")
+    $lines.Add("")
+    $lines.Add('```')
+    $lines.Add((Format-DependencyTree -DependencyGraph $DependencyGraph -Depth 3))
+    $lines.Add('```')
+    $lines.Add("")
+    $lines.Add("---")
+    $lines.Add("")
+    
+    return ($lines -join "`n")
+}
+
+function Format-DependencyTree {
+    param($DependencyGraph, [int]$Depth = 3)
+    
+    # Simple ASCII tree for top 5 core files
+    $coreFiles = Get-CoreFiles -DependencyGraph $DependencyGraph -TopN 5
+    $tree = @()
+    
+    foreach ($cf in $coreFiles) {
+        $file = Split-Path $cf.Key -Leaf
+        $tree += "$file"
+        
+        if ($DependencyGraph.ReverseAdjacencyList.ContainsKey($cf.Key)) {
+            $importers = $DependencyGraph.ReverseAdjacencyList[$cf.Key] | Select-Object -First $Depth
+            foreach ($imp in $importers) {
+                $impFile = Split-Path $imp -Leaf
+                $tree += "├── $impFile"
             }
         }
+        $tree += ""
     }
+    
+    return $tree -join "`n"
 }
 
-if (-not (Test-Path $OutputDir -ErrorAction SilentlyContinue)) {
-    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-}
-
-$ext = switch ($Format) { 'md' { '.md' } 'json' { '.json' } default { '.txt' } }
-if ($OutputFile -eq "") { $OutputFile = "bundle_$projectFolderName$ext" }
-$script:resolvedOutput = [System.IO.Path]::Combine($OutputDir, $OutputFile)
-
-# Overwrite protection
-if ((Test-Path $script:resolvedOutput) -and -not $NoOverwritePrompt -and -not $DryRun) {
-    Write-Host ""
-    Write-Status "WARN" "Output file already exists:" "Yellow" "Yellow"
-    Write-Host "  $script:resolvedOutput" -ForegroundColor White
-    $ovr = Read-Host "  Overwrite? [Y/n]"
-    if ($ovr -match '^n') { Write-Status "ABORT" "Operation cancelled." "Red" "Red"; exit 0 }
-}
-
-Write-Status "FILE"   $OutputFile            "White" "White"
-Write-Status "FORMAT" $Format.ToUpper()      "White" "Gray"
-if ($StripPaths) { Write-Status "PRIVACY" "Absolute paths will be stripped" "Cyan" "Gray" }
-if ($Redact)     { Write-Status "REDACT"  "Secrets will be redacted in output" "Yellow" "Gray" }
-Write-Sep
-
-# ── STEP 4: Scan files ─────────────────────────────────────
-Write-SectionHeader "SCAN"
-Write-Status "SCAN" "Traversing project tree..." "Red" "Gray"
-
-$skippedLarge = [System.Collections.Generic.List[string]]::new()
-$validFiles   = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-$excludePaths = @($script:resolvedOutput)
-
-Get-ProjectFilesFast `
-    -CurrentPath $ProjectRoot `
-    -Root $ProjectRoot `
-    -Files ([ref]$validFiles) `
-    -SkipLarge ([ref]$skippedLarge) `
-    -ExcludeAbsolutePaths $excludePaths `
-    -GitIgnorePatterns $giPatterns
-
-if ($validFiles.Count -eq 0) {
-    Write-Status "ERROR" "No files matched. Check project path or use -ExtraExtensions." "Red" "Red"
-    exit 1
-}
-
-# Logical ordering
-$sortedFiles = $validFiles | Sort-Object { Get-FileSortKey -File $_ -Root $ProjectRoot -DetectedEntryPoint $projectInfo.EntryPoint }
-
-# Language stats
-$langStats = Get-LanguageStats -Files $validFiles
-
-# Token estimation (per file)
-$script:totalTokens = 0L
-foreach ($f in $validFiles) {
-    try {
-        $sample = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
-        $script:totalTokens += Get-TokenEstimate -Chars $sample.Length -Extension $f.Extension -Content $sample
-    } catch { $script:totalTokens += [long]($f.Length / 4) }
-}
-
-Write-Status "FOUND"  "$($validFiles.Count) source files" "White" "White"
-Write-Status "TOKENS" "~$(Format-Tokens $script:totalTokens) estimated" "Yellow" "White"
-
-# Context window warnings
-foreach ($llm in $llmLimits.GetEnumerator()) {
-    $limitTok = $llm.Value * 1000
-    if ($script:totalTokens -gt $limitTok) {
-        Write-Status "WARN" "Exceeds $($llm.Key) limit ($($llm.Value)K). Consider -SplitKTokens $($llm.Value)" "Yellow" "DarkYellow"
+function Generate-HTMLReport {
+    param(
+        [string]$OutputPath,
+        [string]$ProjectName,
+        [System.Collections.Generic.List[hashtable]]$FileAnalyses,
+        [hashtable]$RiskAssessment,
+        $DependencyGraph
+    )
+    
+    $riskLevel = $RiskAssessment.RiskLevel
+    $riskScore = $RiskAssessment.OverallScore
+    $riskColor = Get-RiskColor $riskLevel
+    $generated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $coreCount = (Get-CoreFiles -DependencyGraph $DependencyGraph -TopN 100).Count
+    $safeSecurityFindings = Convert-SecurityFindingsForOutput -Findings $script:secretsFound -DoRedact $Redact.IsPresent
+    $securityRows = if ($safeSecurityFindings.Count -eq 0) {
+        "<p>No security issues detected.</p>"
+    } else {
+        ($safeSecurityFindings | ForEach-Object {
+            $severity = [System.Web.HttpUtility]::HtmlEncode([string]$_.Severity)
+            $pattern = [System.Web.HttpUtility]::HtmlEncode([string]$_.PatternName)
+            $path = [System.Web.HttpUtility]::HtmlEncode([string]$_.RelativePath)
+            $preview = [System.Web.HttpUtility]::HtmlEncode([string]$_.MatchPreview)
+            "<div class='finding finding-$($severity.ToLower())'><strong>$severity</strong>: $pattern<br><code>$path`:$($_.Line)</code><br><small>Confidence: $([Math]::Round($_.Confidence * 100, 1))% | Preview: $preview</small></div>"
+        }) -join "`n"
     }
+    $dependencyRows = (Get-CoreFiles -DependencyGraph $DependencyGraph -TopN 10 | ForEach-Object {
+        "<tr><td><code>$([System.Web.HttpUtility]::HtmlEncode([System.IO.Path]::GetFileName($_.Key)))</code></td><td>$($_.Value)</td></tr>"
+    }) -join "`n"
+    $fileRows = (($FileAnalyses | Sort-Object -Property Tokens -Descending | Select-Object -First 50) | ForEach-Object {
+        $file = [System.Web.HttpUtility]::HtmlEncode([System.IO.Path]::GetFileName($_.RelativePath))
+        "<tr><td><code>$file</code></td><td>$($_.Language)</td><td>$($_.Metrics.TotalLines)</td><td>$($_.Complexity)</td><td>$($_.Tokens)</td><td>$($_.SecurityFindings.Count)</td></tr>"
+    }) -join "`n"
+    
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Intelligence Report - $ProjectName</title>
+    <style>
+        body { font-family: Segoe UI, Arial, sans-serif; margin: 2rem; color: #212529; background: #f8f9fa; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header, section { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; }
+        .stat { background: #f1f3f5; border-radius: 6px; padding: 1rem; text-align: center; }
+        .value { font-size: 1.8rem; font-weight: 700; color: $riskColor; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border-bottom: 1px solid #dee2e6; padding: .6rem; text-align: left; }
+        th { background: #f1f3f5; }
+        code { font-family: Consolas, monospace; }
+        .finding { border-left: 4px solid #6c757d; background: #f8f9fa; margin: .6rem 0; padding: .75rem; }
+        .finding-critical { border-color: #dc3545; }
+        .finding-high { border-color: #fd7e14; }
+        .finding-medium { border-color: #ffc107; }
+        .finding-low { border-color: #28a745; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Project Intelligence Report</h1>
+        <p><strong>Project:</strong> $ProjectName | <strong>Generated:</strong> $generated | <strong>Risk:</strong> $riskLevel ($riskScore/100)</p>
+    </header>
+    <section>
+        <h2>Executive Summary</h2>
+        <div class="stats">
+            <div class="stat"><div class="value">$($FileAnalyses.Count)</div><div>Files Analyzed</div></div>
+            <div class="stat"><div class="value">$($script:secretsFound.Count)</div><div>Security Findings</div></div>
+            <div class="stat"><div class="value">$coreCount</div><div>Core Modules</div></div>
+            <div class="stat"><div class="value">$riskScore</div><div>Risk Score</div></div>
+        </div>
+        <p>$(Get-RiskDescription $riskScore)</p>
+    </section>
+    <section>
+        <h2>Security Findings</h2>
+        $securityRows
+    </section>
+    <section>
+        <h2>Dependency Graph</h2>
+        <table><thead><tr><th>File</th><th>Incoming Dependencies</th></tr></thead><tbody>$dependencyRows</tbody></table>
+    </section>
+    <section>
+        <h2>File Analysis</h2>
+        <table><thead><tr><th>File</th><th>Language</th><th>Lines</th><th>Complexity</th><th>Tokens</th><th>Issues</th></tr></thead><tbody>$fileRows</tbody></table>
+    </section>
+</div>
+</body>
+</html>
+"@
+
+    $html | Out-File -FilePath $OutputPath -Encoding UTF8
+    Write-Status "[HTML]" "Report generated: $OutputPath" "Green" "White"
 }
 
-if ($langStats.Count -gt 0) {
-    $top5 = ($langStats | Select-Object -First 5 | ForEach-Object { "$($_.Language) $($_.Pct)%" }) -join "  |  "
-    Write-Status "LANGS"  $top5 "Cyan" "Gray"
+function Get-RiskBadgeClass {
+    param([string]$Level)
+    return $Level.ToLower()
 }
 
-# ── DRY RUN ────────────────────────────────────────────────
-if ($DryRun) {
-    Write-Host ""; Write-Host "  ─── DRY RUN — No files written ───" -ForegroundColor DarkCyan; Write-Host ""
-    $sortedFiles | ForEach-Object {
-        $rel = $_.FullName.Substring($ProjectRoot.Length).TrimStart('\','/')
-        Write-Host "    $rel" -ForegroundColor Gray
-    }
-    Write-Host ""
-    Write-Status "DRY" "$($validFiles.Count) files | ~$(Format-Tokens $script:totalTokens)" "Cyan" "Cyan"
-    if ($skippedLarge.Count -gt 0) { Write-Status "SKIP" "$($skippedLarge.Count) oversized files excluded" "Yellow" "Yellow" }
-    exit 0
-}
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
 
-Write-Sep
-
-# ── STEP 5: Write bundle ───────────────────────────────────
-Write-SectionHeader "WRITE"
-Write-Status "WRITE" "Compiling bundle..." "Red" "Gray"
-
-$processed   = 0
-$writtenTokens = 0L
-$doStrip     = $StripPaths.IsPresent
-$doRedact    = $Redact.IsPresent
-
-# ─── JSON mode: build object in memory ────────────────────
-if ($Format -eq 'json') {
-    $jsonObj = [ordered]@{
-        bundle = [ordered]@{
-            version    = $script:VERSION
-            generated  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-            project    = $projectFolderName
-            framework  = $projectInfo.Framework
-            entryPoint = $projectInfo.EntryPoint
-            git        = if ($gitMeta.Available) {
-                @{ branch=$gitMeta.Branch; lastCommit=$gitMeta.LastCommit; remote=$gitMeta.Remote }
-            } else { $null }
-            languages  = ($langStats | Select-Object -First 8 | ForEach-Object { @{ lang=$_.Language; pct=$_.Pct } })
-            fileCount  = $validFiles.Count
-            tokenEstimate = $script:totalTokens
-        }
-        files = @()
-    }
-
-    $i = 0
-    foreach ($file in $sortedFiles) {
-        $i++
-        $rel = $file.FullName.Substring($ProjectRoot.Length).TrimStart('\','/').Replace('\','/')
-        if (-not $Quiet) {
-            Write-Progress -Activity "Bundling" -Status "[$i/$($validFiles.Count)] $rel" -PercentComplete (($i/$validFiles.Count)*100)
-        }
-        $content = Read-FileContent -Path $file.FullName
-        if ($null -eq $content) { continue }
-        $null = Invoke-SecretScan -Content $content -RelPath $rel
-        if ($doRedact) { $content = Invoke-SecretRedact -Content $content }
-        $displayPath = if ($doStrip) { "[PROJECT_ROOT]/$rel" } else { $rel }
-        $lang = $languageMap[$file.Extension.ToLower()]
-        $jsonObj.files += @{ path=$displayPath; language=$lang; content=$content }
-        $writtenTokens += Get-TokenEstimate -Chars $content.Length -Extension $file.Extension -Content $content
-        $processed++
-    }
-
-    $jsonObj.bundle.sha256 = "computed-after-write"
-    $jsonStr = $jsonObj | ConvertTo-Json -Depth 10 -Compress:$false
-    [System.IO.File]::WriteAllText($script:resolvedOutput, $jsonStr, [System.Text.Encoding]::UTF8)
-    Write-Progress -Activity "Bundling" -Completed
-
-} else {
-    # ─── TXT / MD mode ────────────────────────────────────
-    try {
-        $script:writer = [System.IO.StreamWriter]::new($script:resolvedOutput, $false, [System.Text.Encoding]::UTF8)
-
-        $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-        # Header block
-        $script:writer.WriteLine("=" * 80)
-        $script:writer.WriteLine("  PROJECT BUNDLE v$($script:VERSION) — Generated $ts")
-        $script:writer.WriteLine("  Project : $projectFolderName")
-        $script:writer.WriteLine("  Files   : $($validFiles.Count)  |  Format: $($Format.ToUpper())  |  Tokens: ~$(Format-Tokens $script:totalTokens)")
-        $script:writer.WriteLine("=" * 80)
-        $script:writer.WriteLine("")
-
-        # LLM context header
-        Invoke-WriteLlmHeader -W $script:writer `
-            -ProjectName $projectFolderName `
-            -ProjectInfo $projectInfo `
-            -GitMeta $gitMeta `
-            -LangStats $langStats `
-            -TotalTokens $script:totalTokens `
-            -FmtStr $Format `
-            -FileCount $validFiles.Count
-
-        # Directory tree
-        if ($IncludeTree) {
-            Write-Status "TREE" "Building directory tree..." "DarkGray" "Gray"
-            $script:writer.WriteLine("=" * 80)
-            $script:writer.WriteLine("  DIRECTORY STRUCTURE (excluded folders omitted)")
-            $script:writer.WriteLine("=" * 80)
-            $script:writer.WriteLine("")
-            $script:writer.WriteLine((Get-FilteredTree -Path $ProjectRoot -Root $ProjectRoot))
-            $script:writer.WriteLine("")
-        }
-
-        # Git changed files (if any)
-        if ($gitMeta.Available -and $gitMeta.ChangedFiles.Count -gt 0) {
-            $script:writer.WriteLine("=" * 80)
-            $script:writer.WriteLine("  GIT STATUS — UNCOMMITTED CHANGES")
-            $script:writer.WriteLine("=" * 80)
-            foreach ($cf in $gitMeta.ChangedFiles) {
-                $script:writer.WriteLine("  $cf")
-            }
-            $script:writer.WriteLine("")
-        }
-
-        $script:writer.WriteLine("=" * 80)
-        $script:writer.WriteLine("  SOURCE FILES ($($validFiles.Count) files — logically ordered)")
-        $script:writer.WriteLine("=" * 80)
-
-        # Write files
-        foreach ($file in $sortedFiles) {
-            $processed++
-            $rel = $file.FullName.Substring($ProjectRoot.Length).TrimStart('\','/').Replace('\','/')
-
-            if (-not $Quiet) {
-                Write-Progress -Activity "Bundling" -Status "[$processed/$($validFiles.Count)] $rel" -PercentComplete (($processed/$validFiles.Count)*100)
-            }
-
-            if (Test-IsBinaryFile -File $file) {
-                $displayPath = if ($doStrip) { "[PROJECT_ROOT]/$rel" } else { $rel }
-                $script:writer.WriteLine("")
-                $script:writer.WriteLine("=" * 80)
-                $script:writer.WriteLine("FILE: $displayPath  [SKIPPED — binary]")
-                $script:writer.WriteLine("=" * 80)
-                continue
-            }
-
-            $ft = Write-FileEntry -Writer $script:writer -File $file -Root $ProjectRoot `
-                -RelPath $rel -Format $Format -DoStripPaths $doStrip -DoRedact $doRedact
-            $writtenTokens += $ft
-        }
-
-        Write-Progress -Activity "Bundling" -Completed
-
-        # Footer with integrity
-        $script:writer.WriteLine("")
-        $script:writer.WriteLine("=" * 80)
-        $script:writer.WriteLine("  END OF BUNDLE")
-        $script:writer.WriteLine("  Files   : $processed")
-        $script:writer.WriteLine("  Tokens  : ~$(Format-Tokens $writtenTokens)")
-        if ($script:secretsFound.Count -gt 0 -and -not $doRedact) {
-            $script:writer.WriteLine("  SECRETS : $($script:secretsFound.Count) potential secret(s) detected — REVIEW BEFORE SHARING")
-        }
-        $script:writer.WriteLine("=" * 80)
-
-    } finally {
-        if ($script:writer) {
-            try { $script:writer.Flush(); $script:writer.Close(); $script:writer.Dispose() } catch {}
-            $script:writer = $null
-        }
-    }
-}
-
-# ── STEP 6: SHA-256 integrity ──────────────────────────────
-if (Test-Path $script:resolvedOutput -ErrorAction SilentlyContinue) {
-    try {
-        $hash = (Get-FileHash -Path $script:resolvedOutput -Algorithm SHA256).Hash.ToLower()
-        # Append SHA-256 to bundle (for txt/md — JSON is already closed)
-        if ($Format -ne 'json') {
-            $hashLine = "`nSHA256: $hash`n"
-            [System.IO.File]::AppendAllText($script:resolvedOutput, $hashLine, [System.Text.Encoding]::UTF8)
-        }
-        Write-Status "SHA256" $hash "DarkGray" "DarkGray"
-    } catch { Write-Status "WARN" "Could not compute SHA-256" "Yellow" "Yellow" }
-}
-
-# ── STEP 7: Write error log ───────────────────────────────
-if ($script:errorLog.Count -gt 0) {
-    $logPath = [System.IO.Path]::Combine($OutputDir, "bundle_errors.log")
-    try {
-        $script:errorLog | Set-Content -Path $logPath -Encoding UTF8
-        Write-Status "ERRORS" "$($script:errorLog.Count) error(s) logged to bundle_errors.log" "Yellow" "Yellow"
-    } catch {}
-}
-
-# ── STEP 8: Save config ───────────────────────────────────
-if ($SaveConfig) { Export-BundleConfig -Root $ProjectRoot }
-
-# ── STEP 9: Append run to history log ────────────────────
 try {
-    $histPath = [System.IO.Path]::Combine($env:USERPROFILE, ".bundle_history.log")
-    $histLine = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  |  $projectFolderName  |  $($validFiles.Count) files  |  $(Format-Tokens $script:totalTokens)  |  $script:resolvedOutput"
-    Add-Content -Path $histPath -Value $histLine -Encoding UTF8 -ErrorAction SilentlyContinue
-} catch {}
-
-# ── SUMMARY ───────────────────────────────────────────────
-$bundleSize = 0
-if (Test-Path $script:resolvedOutput -ErrorAction SilentlyContinue) {
-    $bundleSize = [math]::Round((Get-Item $script:resolvedOutput).Length / 1KB, 1)
-}
-
-Write-Host ""
-Write-Host "  ╔══  BUNDLE COMPLETE  ══╗" -ForegroundColor Red
-Write-Host ""
-Write-Status "OUTPUT"  (Split-Path $script:resolvedOutput -Leaf)         "White"  "White"
-Write-Status "SAVED"   $script:resolvedOutput                             "Green"  "White"
-Write-Status "FILES"   "$processed bundled"                               "White"  "Gray"
-Write-Status "SIZE"    "${bundleSize} KB"                                  "White"  "Gray"
-Write-Status "TOKENS"  "~$(Format-Tokens $writtenTokens)"                  "Yellow" "White"
-Write-Status "FORMAT"  $Format.ToUpper()                                   "White"  "Gray"
-Write-Host ""
-
-if ($langStats.Count -gt 0) {
-    Write-Status "LANGUAGES" "" "Cyan" "Gray"
-    foreach ($ls in ($langStats | Select-Object -First 8)) {
-        Write-Host "           $($ls.Language.PadRight(16)) $($ls.Pct)%" -ForegroundColor DarkGray
+    # Show banner
+    Write-Banner
+    
+    # Resolve paths
+    if (-not $ProjectRoot) {
+        $ProjectRoot = Get-Location
     }
-    Write-Host ""
-}
-
-if ($skippedLarge.Count -gt 0) {
-    Write-Status "WARN" "Skipped (>${MaxFileSizeMB}MB): $($skippedLarge.Count)" "Yellow" "Yellow"
-    $skippedLarge | ForEach-Object { Write-Host "           $_" -ForegroundColor DarkYellow }
-}
-
-if ($script:secretsFound.Count -gt 0) {
-    Write-Host ""
-    if ($doRedact) {
-        Write-Status "REDACTED" "$($script:secretsFound.Count) secret(s) redacted in output" "Green" "Green"
+    $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+    
+    if (-not (Test-Path $ProjectRoot)) {
+        Write-Host "ERROR: Project root not found: $ProjectRoot" -ForegroundColor Red
+        exit 1
+    }
+    
+    if (-not $OutputDir) {
+        $OutputDir = $ProjectRoot
+    }
+    $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+    
+    # Initialize cache if enabled
+    if ($EnableCache) {
+        $cache = Initialize-Cache -ProjectRoot $ProjectRoot
+        Write-Status "[CACHE]" "Initialized at $($script:cachePath)" "Cyan" "White"
+    }
+    
+    # Discover files
+    Write-SectionHeader "Discovery Phase"
+    Write-Status "[SCAN]" "Scanning: $ProjectRoot" "Cyan" "White"
+    
+    $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    
+    try {
+        Get-ChildItem -Path $ProjectRoot -Recurse -File -Force -ErrorAction SilentlyContinue | 
+        Where-Object {
+            $ext = $_.Extension.ToLower()
+            $name = $_.Name.ToLower()
+            $dir = $_.DirectoryName
+            
+            # Check extension whitelist
+            if ($includeExtensions -notcontains $ext) { return $false }
+            
+            # Check excluded folders
+            if ($dir -split '[\\/]' | Where-Object { $excludeFolders -contains $_ }) { return $false }
+            
+            # Check excluded file patterns
+            if ($excludeFilePatterns | Where-Object { $name -like $_ }) { return $false }
+            
+            # Skip .env files except safe ones
+            if ($name -eq '.env' -and $safeEnvFiles -notcontains $name) { return $false }
+            
+            # Skip binary files (simple heuristic)
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+                if ($bytes.Length -gt 0) {
+                    $nullRatio = ($bytes | Where-Object { $_ -eq 0 }).Count / $bytes.Length
+                    if ($nullRatio -gt 0.3) { return $false }
+                }
+            } catch {
+                return $false
+            }
+            
+            # Skip large files
+            if ($_.Length -gt $maxFileBytes) { return $false }
+            
+            return $true
+        } | ForEach-Object {
+            $files.Add($_)
+            if (-not $Quiet) {
+                Write-Progress-Bar -Current $files.Count -Total $files.Count -Activity "files discovered"
+            }
+        }
+    } finally {
+        Write-Host ""  # Clear progress line
+    }
+    
+    $stopwatch.Stop()
+    Write-Status "[FOUND]" "$($files.Count) files in $($stopwatch.ElapsedMilliseconds)ms" "Green" "White"
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No files to bundle!" -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Analyze files
+    Write-SectionHeader "Analysis Phase"
+    
+    $fileAnalyses = [System.Collections.Generic.List[hashtable]]::new()
+    $stopwatch.Restart()
+    
+    if ($Parallel) {
+        $results = Invoke-ParallelFileAnalysis -Files $files -MaxThreads $MaxThreads
+        foreach ($result in $results) {
+            if ($result) {
+                $fileAnalyses.Add($result)
+            }
+        }
     } else {
-        Write-Status "SECRETS!" "$($script:secretsFound.Count) potential secret(s) detected — DO NOT share without review" "Red" "Red"
-        $script:secretsFound | Select-Object -Unique -Property Name,File | ForEach-Object {
-            Write-Host "           [$($_.Name)]  $($_.File)" -ForegroundColor DarkYellow
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $file = $files[$i]
+            $analysis = Invoke-SingleFileAnalysis -File $file
+            
+            if ($analysis) {
+                $fileAnalyses.Add($analysis)
+            }
+            
+            if (-not $Quiet) {
+                Write-Progress-Bar -Current ($i + 1) -Total $files.Count -Activity "analyzing"
+            }
         }
     }
-}
-
-if ($script:errorLog.Count -gt 0) {
+    
+    $stopwatch.Stop()
+    Write-Host ""  # Clear progress line
+    Write-Status "[ANALYZED]" "$($fileAnalyses.Count) files in $($stopwatch.ElapsedMilliseconds)ms" "Green" "White"
+    
+    # Build dependency graph
+    if ($BuildDepGraph) {
+        Write-Status "[GRAPH]" "Building dependency graph..." "Cyan" "White"
+        $script:dependencyGraph = Build-DependencyGraph -FileAnalyses $fileAnalyses
+        $cycles = Find-CircularDependencies -DependencyGraph $script:dependencyGraph
+        if ($cycles.Count -gt 0) {
+            Write-Status "[CYCLES]" "$($cycles.Count) circular dependencies detected" "Yellow" "White"
+        } else {
+            Write-Status "[GRAPH]" "No circular dependencies found" "Green" "White"
+        }
+    }
+    
+    # Calculate aggregate metrics
+    $totalTokens = ($fileAnalyses | Measure-Object -Sum -Property Tokens).Sum
+    $avgComplexity = [Math]::Round(($fileAnalyses | Measure-Object -Average -Property Complexity).Average, 1)
+    $avgDuplication = [Math]::Round(($fileAnalyses | Measure-Object -Average -Property { $_.Metrics.DuplicationRatio }).Average, 3)
+    
+    $qualityMetrics = @{
+        AvgComplexity = $avgComplexity
+        AvgDuplicationRatio = $avgDuplication
+    }
+    
+    # Calculate risk score
+    $riskAssessment = Calculate-RiskScore `
+        -SecurityFindings $script:secretsFound `
+        -QualityMetrics $qualityMetrics `
+        -DependencyGraph $script:dependencyGraph
+    
+    Write-Status "[RISK]" "Score: $($riskAssessment.OverallScore)/100 ($($riskAssessment.RiskLevel))" "Cyan" "White"
+    
+    # Sort files by importance
+    $sortedAnalyses = $fileAnalyses | Sort-Object -Property SortKey
+    
+    # Generate output
+    Write-SectionHeader "Output Generation"
+    
+    if (-not $OutputFile) {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $OutputFile = "bundle_$timestamp.$Format"
+    }
+    
+    $outputPath = Join-Path $OutputDir $OutputFile
+    
+    # Check for overwrite
+    if ((Test-Path $outputPath) -and -not $NoOverwritePrompt -and -not $DryRun) {
+        $response = Read-Host "File exists: $outputPath. Overwrite? (y/n)"
+        if ($response -ne 'y') {
+            Write-Host "Aborted." -ForegroundColor Yellow
+            exit 0
+        }
+    }
+    
+    if ($DryRun) {
+        Write-Status "[DRYRUN]" "Would write to: $outputPath" "Yellow" "White"
+        Write-Status "[DRYRUN]" "Total files: $($fileAnalyses.Count)" "Yellow" "White"
+        Write-Status "[DRYRUN]" "Total tokens: $([Math]::Round($totalTokens / 1000, 1))K" "Yellow" "White"
+        exit 0
+    }
+    
+    # Write Markdown output
+    if ($Format -eq 'md' -or $Format -eq 'txt') {
+        $writer = [System.IO.StreamWriter]::new($outputPath, $false, [System.Text.Encoding]::UTF8)
+        
+        try {
+            # Header
+            $projectName = Split-Path $ProjectRoot -Leaf
+            $framework = Detect-Framework -ProjectRoot $ProjectRoot
+            
+            $header = Write-MarkdownHeader `
+                -ProjectName $projectName `
+                -Framework $framework `
+                -TotalFiles $fileAnalyses.Count `
+                -TotalTokens ([Math]::Round($totalTokens / 1000, 1)) `
+                -RiskAssessment $riskAssessment `
+                -GeneratedAt (Get-Date)
+            
+            $writer.WriteLine($header)
+            
+            # Dependency graph
+            if ($BuildDepGraph) {
+                $writer.WriteLine((Write-DependencyGraphMarkdown -DependencyGraph $script:dependencyGraph))
+            }
+            
+            # File contents
+            $writer.WriteLine("## File Contents`n")
+            
+            foreach ($analysis in $sortedAnalyses) {
+                $lang = $analysis.Language ?? 'plaintext'
+                $filePath = if ($StripPaths) {
+                    $analysis.RelativePath.Replace($ProjectRoot, '[PROJECT_ROOT]')
+                } else {
+                    $analysis.RelativePath
+                }
+                
+                $writer.WriteLine("### ````$filePath````")
+                $writer.WriteLine("")
+                $writer.WriteLine(('```' + $lang))
+                $writer.WriteLine($analysis.Content)
+                $writer.WriteLine('```')
+                $writer.WriteLine("")
+            }
+            
+            # Footer
+            $writer.WriteLine("---")
+            $writer.WriteLine("*Generated by BUNDLE.ps1 v$($script:VERSION)*")
+            
+        } finally {
+            $writer.Close()
+        }
+        
+        $hash = (Get-FileHash -Path $outputPath -Algorithm SHA256).Hash
+        Add-Content -Path $outputPath -Value "*SHA-256 before hash footer: $hash*" -Encoding UTF8
+        
+        Write-Status "[WRITE]" "Output: $outputPath" "Green" "White"
+    }
+    elseif ($Format -eq 'json') {
+        $safeGlobalFindings = Convert-SecurityFindingsForOutput -Findings $script:secretsFound -DoRedact $Redact.IsPresent
+        $jsonOutput = [ordered]@{
+            generatedAt = (Get-Date).ToString("o")
+            generator = "BUNDLE.ps1"
+            version = $script:VERSION
+            projectRoot = if ($StripPaths) { "[PROJECT_ROOT]" } else { $ProjectRoot }
+            format = "json"
+            totals = [ordered]@{
+                files = $fileAnalyses.Count
+                estimatedTokens = $totalTokens
+                averageComplexity = $avgComplexity
+                averageDuplicationRatio = $avgDuplication
+            }
+            risk = $riskAssessment
+            securityFindings = $safeGlobalFindings
+            files = @($sortedAnalyses | ForEach-Object {
+                [ordered]@{
+                    path = $_.RelativePath
+                    language = $_.Language
+                    tokens = $_.Tokens
+                    complexity = $_.Complexity
+                    metrics = $_.Metrics
+                    imports = $_.Imports
+                    exports = $_.Exports
+                    securityFindings = Convert-SecurityFindingsForOutput -Findings $_.SecurityFindings -DoRedact $Redact.IsPresent
+                    content = $_.Content
+                }
+            })
+        }
+        $jsonOutput | ConvertTo-Json -Depth 20 | Out-File -FilePath $outputPath -Encoding UTF8
+        Write-Status "[WRITE]" "Output: $outputPath" "Green" "White"
+    }
+    elseif ($Format -eq 'html') {
+        Generate-HTMLReport `
+            -OutputPath $outputPath `
+            -ProjectName (Split-Path $ProjectRoot -Leaf) `
+            -FileAnalyses $fileAnalyses `
+            -RiskAssessment $riskAssessment `
+            -DependencyGraph $script:dependencyGraph
+    }
+    
+    # Generate HTML report if requested
+    if ($GenerateHTML -and $Format -ne 'html') {
+        $htmlPath = $outputPath -replace '\.[^.]+$', '.html'
+        Generate-HTMLReport `
+            -OutputPath $htmlPath `
+            -ProjectName (Split-Path $ProjectRoot -Leaf) `
+            -FileAnalyses $fileAnalyses `
+            -RiskAssessment $riskAssessment `
+            -DependencyGraph $script:dependencyGraph
+    }
+    
+    # Save config if requested
+    if ($SaveConfig) {
+        $config = @{
+            ProjectRoot = $ProjectRoot
+            Format = $Format
+            Profile = $Profile
+            MaxFileSizeMB = $MaxFileSizeMB
+            EnableCache = $EnableCache
+            Parallel = $Parallel
+            GeneratedAt = Get-Date -Format "o"
+        }
+        $configPath = Join-Path $ProjectRoot "bundle.config.json"
+        $config | ConvertTo-Json | Out-File -FilePath $configPath -Encoding UTF8
+        Write-Status "[CONFIG]" "Saved: $configPath" "Green" "White"
+    }
+    
+    # Summary
+    Write-SectionHeader "Summary"
+    Write-Status "[FILES]" "$($fileAnalyses.Count) files bundled" "Green" "White"
+    Write-Status "[TOKENS]" "$([Math]::Round($totalTokens / 1000, 1))K estimated tokens" "Green" "White"
+    Write-Status "[SECRETS]" "$($script:secretsFound.Count) potential issues found" $(if ($script:secretsFound.Count -gt 0) { 'Red' } else { 'Green' }) "White"
+    Write-Status "[COMPLEXITY]" "Average: $avgComplexity" "Cyan" "White"
+    
+    $elapsed = (Get-Date) - $script:startTime
+    Write-Status "[TIME]" "Total: $($elapsed.TotalSeconds.ToString("F2"))s" "Cyan" "White"
+    
+    # Context window fit
+    Write-Sep
+    Write-Status "[LLM FIT]" "Context Window Analysis:" "Cyan" "White"
+    foreach ($llm in $llmLimits.Keys) {
+        $limit = $llmLimits[$llm]
+        $fits = if ($totalTokens / 1000 -le $limit) { "✓ Fits" } else { "✗ Exceeds" }
+        $color = if ($totalTokens / 1000 -le $limit) { "Green" } else { "Red" }
+        Write-Status "  $llm" "$limit`K - $fits" "Gray" $color
+    }
+    
     Write-Host ""
-    Write-Status "ERRORS" "$($script:errorLog.Count) error(s) — see bundle_errors.log" "Yellow" "DarkYellow"
+    Write-Host "Done! 🎉" -ForegroundColor Green
+    
+} catch {
+    Write-Host "FATAL ERROR: $_" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    
+    if ($script:writer) {
+        $script:writer.Close()
+    }
+    
+    exit 1
+} finally {
+    if ($script:writer) {
+        $script:writer.Dispose()
+    }
 }
 
-Write-Host ""
-$secStatus = if ($script:secretsFound.Count -eq 0) { "No secrets detected" } else { "$($script:secretsFound.Count) secret(s) flagged" }
-Write-Status "SECURITY" ".env excluded  |  .gitignore respected  |  $secStatus" "DarkGray" "DarkGray"
-Write-Status "DONE"     "Drop the output file into any AI tool. The header tells it everything." "DarkGray" "DarkGray"
-Write-Host ""
